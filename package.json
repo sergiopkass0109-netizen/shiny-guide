@@ -1,0 +1,18 @@
+{
+  "name": "nth-prime",
+  "version": "1.0.0",
+  "description": "Find the n-th prime number fast: Riemann R inverse estimate + Lucy_Hedgehog O(x^3/4) exact prime counting + segmented sieve walk. Zero dependencies; browser UI, Node CLI and library.",
+  "main": "nthprime.js",
+  "bin": { "nth-prime": "./cli.js" },
+  "scripts": {
+    "test": "node test/test.js",
+    "test:slow": "node test/test.js --slow",
+    "bench": "node bench.js",
+    "bench:big": "node bench.js --big",
+    "serve": "python3 -m http.server 8000",
+    "start": "python3 -m http.server 8000"
+  },
+  "keywords": ["prime", "nth-prime", "prime-counting", "number-theory", "sieve", "lucy-hedgehog", "riemann"],
+  "license": "MIT",
+  "engines": { "node": ">=14" }
+}
