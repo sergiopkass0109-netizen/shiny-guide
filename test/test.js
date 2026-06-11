@@ -236,6 +236,22 @@ section("input validation");
   eq(NP.nthPrime("1000000").value, 15485863, "string input accepted");
 })();
 
+// ---------------------------------------------------------------- 9
+section("index.html is self-contained and in sync (run `npm run build` if not)");
+(function () {
+  var fs = require("fs");
+  var path = require("path");
+  var root = path.join(__dirname, "..");
+  var html = fs.readFileSync(path.join(root, "index.html"), "utf8");
+  var engine = fs.readFileSync(path.join(root, "nthprime.js"), "utf8").trim();
+  var style = fs.readFileSync(path.join(root, "style.css"), "utf8").trim();
+  check(html.indexOf(engine) !== -1, "index.html embeds current nthprime.js");
+  check(html.indexOf(style) !== -1, "index.html embeds current style.css");
+  check(html.indexOf("/*BUILD:") === -1, "no unreplaced build markers");
+  check(html.indexOf("<script src=") === -1 && html.indexOf("<link rel=\"stylesheet\"") === -1,
+    "no external file references");
+})();
+
 // ----------------------------------------------------------------
 console.log("\n" + checks + " checks, " + failures + " failure(s)" + (SLOW ? " [slow mode]" : ""));
 if (failures > 0) process.exit(1);

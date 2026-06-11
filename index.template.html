@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<!--
+  GENERATED FILE NOTICE: index.html is generated from index.template.html
+  by `node build.js`, which inlines style.css and nthprime.js so the page
+  is one fully self-contained file (works even if you save just index.html).
+  Edit index.template.html / style.css / nthprime.js, then run `npm run build`.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The n-th Prime</title>
+<style>
+/*BUILD:STYLE*/
+</style>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>π</text></svg>">
+</head>
+<body>
+<main>
+  <header>
+    <h1>The <em>n</em>-th Prime</h1>
+    <p class="tagline">
+      Riemann&nbsp;R inverse estimate&nbsp;·&nbsp;Lucy_Hedgehog exact count
+      <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;segmented sieve walk
+    </p>
+  </header>
+
+  <section class="card" id="ask-card">
+    <label for="n-input">n&nbsp;=</label>
+    <div class="ask-row">
+      <input id="n-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"
+             placeholder="e.g. 1000000  ·  1e9  ·  10^12" autofocus>
+      <button id="go" type="button">Find&nbsp;p(n)</button>
+    </div>
+    <div class="chips" aria-label="examples">
+      <button class="chip" data-n="100">100</button>
+      <button class="chip" data-n="1e6">10^6</button>
+      <button class="chip" data-n="1e8">10^8</button>
+      <button class="chip" data-n="1e9">10^9</button>
+      <button class="chip" data-n="1e10">10^10</button>
+      <button class="chip" data-n="1e12">10^12</button>
+    </div>
+    <p class="hint">any whole number from 1 to 10<sup>12</sup> — commas, <code>1e9</code> and <code>10^k</code> all work</p>
+  </section>
+
+  <section class="card answer-card">
+    <div class="answer-label" id="answer-label">the answer appears here</div>
+    <div class="answer-row">
+      <output id="answer" for="n-input">&nbsp;</output>
+      <button id="copy" type="button" title="copy the plain digits" hidden>copy</button>
+    </div>
+    <div class="progress" id="progress" hidden><div class="progress-bar" id="progress-bar"></div></div>
+    <div class="error" id="error" hidden></div>
+    <dl class="stats" id="stats" hidden>
+      <div><dt>method</dt><dd id="s-method"></dd></div>
+      <div><dt>R<sup>−1</sup>(n) guess</dt><dd id="s-guess"></dd></div>
+      <div><dt>π(guess), exact</dt><dd id="s-pi"></dd></div>
+      <div><dt>guess missed by</dt><dd id="s-off"></dd></div>
+      <div><dt>integers sieved in walk</dt><dd id="s-walk"></dd></div>
+      <div><dt>time</dt><dd id="s-time"></dd></div>
+    </dl>
+  </section>
+
+  <footer>
+    <p>
+      Exact for every 1 ≤ n ≤ 10<sup>12</sup> (answers stay below 2<sup>53</sup>).
+      This page is one self-contained file — saving it works.
+      Verified against <a href="https://oeis.org/A006988">OEIS A006988</a>,
+      π(10<sup>k</sup>) reference values, and an independent sieve.
+      Math: Cipolla (1902) &amp; <a href="https://mathworld.wolfram.com/GramSeries.html">Gram series</a>
+      for the estimate, rigorous Rosser/Dusart brackets,
+      <a href="https://math.berkeley.edu/~elafandi/euler/p10/">Lucy_Hedgehog</a> counting,
+      architecture after <a href="https://github.com/kimwalisch/primecount">primecount</a>.
+      Heads-up: n ≥ 10<sup>11</sup> takes a while — the count is O(x<sup>3/4</sup>) in pure JS.
+    </p>
+  </footer>
+</main>
+
+<script id="engine-src">
+/*BUILD:ENGINE*/
+</script>
+<script>
+(function () {
+  "use strict";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var input = $("n-input"), go = $("go"), answer = $("answer"), copyBtn = $("copy");
+  var answerLabel = $("answer-label"), errBox = $("error"), stats = $("stats");
+  var progress = $("progress"), progressBar = $("progress-bar");
+  var running = false, jobId = 0, worker = null, plainDigits = "";
+  var pendingN = null;
+
+  // Accept "1234567", "1,234,567", "1_000_000", "1e9", "10^12".
+  function parseN(raw) {
+    var s = String(raw).trim().toLowerCase().replace(/[,_\s]/g, "");
+    if (!s) return null;
+    var v;
+    var m = /^10\^(\d{1,2})$/.exec(s);
+    if (m) v = Math.pow(10, +m[1]);
+    else if (/^\d+$/.test(s) || /^\d+(\.\d+)?e\+?\d{1,2}$/.test(s)) v = Number(s);
+    else return null;
+    if (!isFinite(v) || Math.floor(v) !== v) return null;
+    return v;
+  }
+
+  function fmt(x) { return Number(x).toLocaleString("en-US"); }
+
+  function setBusy(b) {
+    running = b;
+    go.disabled = b;
+    go.textContent = b ? "working…" : "Find p(n)";
+    progress.hidden = !b;
+    if (b) progressBar.style.width = "2%";
+  }
+
+  function showError(msg) {
+    errBox.textContent = msg;
+    errBox.hidden = false;
+    answer.textContent = " ";
+    answerLabel.textContent = "the answer appears here";
+    copyBtn.hidden = true;
+    stats.hidden = true;
+  }
+
+  function showResult(n, res) {
+    errBox.hidden = true;
+    plainDigits = String(res.value);
+    answer.textContent = fmt(res.value);
+    answerLabel.innerHTML = "p(" + fmt(n) + ") — the " + ordinal(n) + " prime";
+    copyBtn.hidden = false;
+    $("s-method").textContent = res.method;
+    if (res.guess !== undefined) {
+      $("s-guess").textContent = fmt(res.guess);
+      $("s-pi").textContent = fmt(res.piAtGuess);
+      $("s-off").textContent = fmt(Math.abs(res.offBy)) + " prime" + (Math.abs(res.offBy) === 1 ? "" : "s") +
+        (res.offBy === 0 ? " (dead on)" : res.offBy > 0 ? " low" : " high");
+      $("s-walk").textContent = fmt(res.walked);
+    } else {
+      $("s-guess").textContent = $("s-pi").textContent = $("s-off").textContent = $("s-walk").textContent = "—";
+    }
+    $("s-time").textContent = (res.ms >= 1000 ? (res.ms / 1000).toFixed(2) + " s" : res.ms + " ms") +
+      (res.msCount !== undefined ? " (count " + Math.round(res.msCount) + " ms, walk " + Math.round(res.msWalk) + " ms)" : "");
+    stats.hidden = false;
+  }
+
+  function ordinal(n) {
+    var t = n % 100;
+    if (t >= 11 && t <= 13) return fmt(n) + "th";
+    var d = n % 10;
+    return fmt(n) + (d === 1 ? "st" : d === 2 ? "nd" : d === 3 ? "rd" : "th");
+  }
+
+  // Background thread built from the inline engine source, so this page
+  // needs no external files. Falls back to the main thread automatically.
+  function getWorker() {
+    if (worker !== null) return worker;
+    try {
+      var src = document.getElementById("engine-src").textContent +
+        "\nself.onmessage = function (e) {" +
+        "  var id = e.data.id, n = e.data.n;" +
+        "  try {" +
+        "    var result = self.NthPrime.nthPrime(n, { onProgress: function (ph, f) {" +
+        "      self.postMessage({ id: id, progress: { phase: ph, frac: f } });" +
+        "    } });" +
+        "    self.postMessage({ id: id, n: n, ok: true, result: result });" +
+        "  } catch (err) {" +
+        "    self.postMessage({ id: id, n: n, ok: false, error: String((err && err.message) || err) });" +
+        "  }" +
+        "};";
+      var url = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
+      worker = new Worker(url);
+      worker.onmessage = function (e) {
+        var msg = e.data;
+        if (msg.id !== jobId) return; // stale job
+        if (msg.progress) {
+          progressBar.style.width = Math.max(2, Math.round(msg.progress.frac * 100)) + "%";
+          return;
+        }
+        setBusy(false);
+        if (msg.ok) showResult(msg.n, msg.result);
+        else showError(msg.error);
+      };
+      worker.onerror = function () {
+        // Worker unusable (some browsers restrict it for local files):
+        // finish the in-flight job on the main thread instead.
+        worker = false;
+        if (running && pendingN !== null) computeSync(pendingN);
+      };
+    } catch (e) {
+      worker = false;
+    }
+    return worker;
+  }
+
+  function computeSync(n) {
+    var id = jobId;
+    setTimeout(function () { // let the UI paint "working…" first
+      try {
+        var res = NthPrime.nthPrime(n);
+        if (id !== jobId) return;
+        setBusy(false);
+        showResult(n, res);
+      } catch (err) {
+        if (id !== jobId) return;
+        setBusy(false);
+        showError(String((err && err.message) || err));
+      }
+    }, 30);
+  }
+
+  function compute() {
+    if (running) return;
+    var n = parseN(input.value);
+    if (n === null) { showError("Please enter a whole number, like 1000000, 1e9 or 10^12."); return; }
+    if (n < 1) { showError("n must be at least 1 — the 1st prime is 2."); return; }
+    if (n > NthPrime.MAX_N) { showError("n must be at most 10^12 so the answer stays exact (below 2^53)."); return; }
+
+    jobId++;
+    pendingN = n;
+    setBusy(true);
+    answerLabel.textContent = "computing p(" + fmt(n) + ")…";
+    answer.textContent = " ";
+    copyBtn.hidden = true;
+    errBox.hidden = true;
+    stats.hidden = true;
+
+    var w = getWorker();
+    if (w) w.postMessage({ id: jobId, n: n });
+    else computeSync(n);
+  }
+
+  go.addEventListener("click", compute);
+  input.addEventListener("keydown", function (e) { if (e.key === "Enter") compute(); });
+  Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (chip) {
+    chip.addEventListener("click", function () {
+      input.value = chip.getAttribute("data-n");
+      compute();
+    });
+  });
+  copyBtn.addEventListener("click", function () {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(plainDigits).then(function () {
+        copyBtn.textContent = "copied!";
+      }).catch(function () {
+        copyBtn.textContent = plainDigits;
+      });
+    } else {
+      copyBtn.textContent = plainDigits;
+    }
+    setTimeout(function () { copyBtn.textContent = "copy"; }, 1500);
+  });
+})();
+</script>
+</body>
+</html>

@@ -15,8 +15,9 @@ p(10¹²) =  29,996,224,275,833     ~16 s        (the trillionth prime)
 
 ## Using it
 
-**Web page** — open `index.html` in a browser, or better (enables the
-background-thread worker):
+**Web page** — `index.html` is one fully self-contained file: open it in any
+browser (double-click works, no server needed), host it on GitHub Pages, or
+serve it locally:
 
 ```sh
 python3 -m http.server 8000      # or: npm run serve
@@ -163,12 +164,13 @@ layers:
 
 | file | purpose |
 |---|---|
-| `index.html` | the page: numerical box in, answer box out |
-| `style.css` | styling |
-| `nthprime.js` | the engine (browser + worker + Node, zero deps) |
-| `worker.js` | Web Worker so the page never freezes |
+| `index.html` | the page: numerical box in, answer box out — **generated**, self-contained (computes in a Web Worker built from the inlined engine, with main-thread fallback) |
+| `index.template.html` | source template for the page |
+| `style.css` | styling (inlined into index.html) |
+| `nthprime.js` | the engine (inlined into index.html; also used directly by Node) |
+| `build.js` | `npm run build` → regenerates index.html from the three files above |
 | `cli.js` | `node cli.js 1e9` |
-| `test/test.js` | the verification suite |
+| `test/test.js` | the verification suite (includes an index.html-in-sync check) |
 | `bench.js` | timing table |
 
 ## Research sources
