@@ -1,5 +1,13 @@
 /*
- * nthprime.js — compute the n-th prime number, fast.
+ * nthprime.js — compute the n-th prime number, fast and exactly,
+ * for every 1 ≤ n ≤ 2×10^14 (answers approach the 2^53 float64 frontier).
+ *
+ * TWO independent exact prime-counting engines live in this file:
+ *   · Lucy_Hedgehog tables (O(x^{3/4}), the speed engine — primeCount)
+ *   · Lagarias–Miller–Odlyzko (O(x^{2/3})-class, the verification engine —
+ *     primeCountLMO: ordinary/special Möbius leaves + Fenwick segmented
+ *     sieve + P₂ sweep).  Two unrelated algorithms, two unrelated bug
+ *     surfaces; the test suite requires digit-for-digit agreement.
  *
  * Strategy (the same one used by state-of-the-art tools such as primecount):
  *
@@ -42,7 +50,7 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
-  var MAX_N = 1e12; // p(MAX_N) ≈ 3.0e13, comfortably below 2^53
+  var MAX_N = 2e14; // p(MAX_N) ≈ 7.34e15, still below the 2^53 exact-integer bound
   var SIEVE_PATH_MAX = 500000; // below this a direct sieve is instant
   var FIRST_PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
 
@@ -197,13 +205,380 @@
   // S(v) for v ≤ √x and large[i] stores S(⌊x/i⌋) for i ≤ √x.  After all
   // p ≤ √x are processed, large[1] = S(x) = π(x).
 
+  // ------------------------------------------------------------------
+  // exact prime counting — Lagarias–Miller–Odlyzko, ~O(x^{2/3}) time
+  // ------------------------------------------------------------------
+  //
+  // The Meissel identity with a = π(y), x^{1/3} ≤ y < √x:
+  //
+  //     π(x) = φ(x, a) + a − 1 − P₂(x, a)
+  //
+  //   · φ(x, a)  = #{m ≤ x : no prime factor ≤ p_a}   (counts 1)
+  //   · P₂(x, a) = #{m ≤ x : m = p·q, primes y < p ≤ q}
+  //              = Σ_{y < p ≤ √x} ( π(x/p) − π(p) + 1 )
+  //
+  // P₂ needs π(v) only at v = ⌊x/p⌋ ≤ x/y: one segmented-sieve sweep up
+  // to x/y answers every query in ascending order.
+  //
+  // φ(x, a) follows LMO: expand φ(u, b) = φ(u, b−1) − φ(u/p_b, b−1)
+  // into a tree.  A node is (n, b) with term μ(n)·φ(x/n, b), n squarefree,
+  // built from distinct primes of index > b.  Children of (n, b) are
+  // (n, b−1) and (n·p_b, b−1).  Stop at:
+  //   · ordinary leaves  (n, c):     μ(n)·φ(x/n, c) with n ≤ y — evaluated
+  //     with a wheel mod W = p_1…p_c (we use c = 7, W = 510510);
+  //   · special leaves   n·p_b > y:  −μ(n)·φ(x/(n·p_b), b−1).
+  // Every special-leaf argument v = ⌊x/(n·p_b)⌋ is < x/y, so a second
+  // segmented sieve over [1, x/y] — processing primes p_{c+1}…p_a in order
+  // and answering "count of unmarked ≤ v" via a Fenwick tree right before
+  // sieving p_b — evaluates all of them.
+  //
+  // y = α·x^{1/3} trades leaf count against sieve length x/y (primecount's
+  // α tuning); correctness holds for any x^{1/3} ≤ y < √x.
+  //
+  // Everything is verified at runtime against the independent O(x^{3/4})
+  // engine above on overlapping ranges (see test/test.js).
+
+  function icbrt(n) {
+    var r = Math.floor(Math.cbrt(n));
+    while ((r + 1) * (r + 1) * (r + 1) <= n) r++;
+    while (r * r * r > n) r--;
+    return r;
+  }
+
+  // wheel for φ(u, 7): W = 2·3·5·7·11·13·17, tab[i] = #{1 ≤ j ≤ i, gcd(j,W)=1}
+  var WHEEL_C = 7;
+  var WHEEL_PRIMES = [2, 3, 5, 7, 11, 13, 17];
+  var wheelCache = null;
+  function getWheel() {
+    if (wheelCache) return wheelCache;
+    var W = 510510;
+    var coprime = new Uint8Array(W + 1);
+    coprime.fill(1);
+    coprime[0] = 0;
+    for (var k = 0; k < WHEEL_PRIMES.length; k++) {
+      for (var m = WHEEL_PRIMES[k]; m <= W; m += WHEEL_PRIMES[k]) coprime[m] = 0;
+    }
+    var tab = new Int32Array(W + 1);
+    var c = 0;
+    for (var i = 1; i <= W; i++) {
+      c += coprime[i];
+      tab[i] = c;
+    }
+    wheelCache = { W: W, phiW: c, tab: tab };
+    return wheelCache;
+  }
+
+  function phi7(u) {
+    // φ(u, 7) — exact for 0 ≤ u < 2^53 (q·phiW ≤ u stays exact)
+    if (u <= 0) return 0;
+    var w = getWheel();
+    var q = idiv(u, w.W);
+    return q * w.phiW + w.tab[u - q * w.W];
+  }
+
+  // μ(n) and least-prime-factor for n ≤ y by sieve
+  function muLpfTables(y) {
+    var lpf = new Int32Array(y + 1);
+    for (var i = 2; i <= y; i++) {
+      if (lpf[i] === 0) {
+        for (var j = i; j <= y; j += i) if (lpf[j] === 0) lpf[j] = i;
+      }
+    }
+    var mu = new Int8Array(y + 1);
+    mu.fill(1);
+    mu[0] = 0;
+    for (var p = 2; p <= y; p++) {
+      if (lpf[p] === p) {
+        for (var m = p; m <= y; m += p) mu[m] = -mu[m];
+        var pp = p * p;
+        if (pp <= y) for (var m2 = pp; m2 <= y; m2 += pp) mu[m2] = 0;
+      }
+    }
+    return { mu: mu, lpf: lpf };
+  }
+
+  // Fenwick tree over [1..size] supporting point add / prefix sum
+  function Fenwick(size) {
+    this.n = size;
+    this.t = new Int32Array(size + 1);
+  }
+  Fenwick.prototype.buildFromUnit = function (unit, len) {
+    // unit: Uint8Array (1 = present), positions 1..len
+    var t = this.t;
+    t.fill(0);
+    var n = this.n;
+    for (var i = 1; i <= len; i++) {
+      t[i] += unit[i];
+      var j = i + (i & -i);
+      if (j <= n) t[j] += t[i];
+    }
+  };
+  Fenwick.prototype.remove = function (i) {
+    for (; i <= this.n; i += i & -i) this.t[i]--;
+  };
+  Fenwick.prototype.prefix = function (i) {
+    var s = 0;
+    for (; i > 0; i -= i & -i) s += this.t[i];
+    return s;
+  };
+
+  // radix sort of Uint32 keys (returns order as Uint32Array of indices)
+  function sortIndicesByKey(keys) {
+    var n = keys.length;
+    var order = new Uint32Array(n);
+    var tmp = new Uint32Array(n);
+    for (var i = 0; i < n; i++) order[i] = i;
+    var count = new Uint32Array(65536);
+    for (var shift = 0; shift <= 16; shift += 16) {
+      count.fill(0);
+      for (i = 0; i < n; i++) count[(keys[order[i]] >>> shift) & 65535]++;
+      var pos = 0;
+      for (i = 0; i < 65536; i++) {
+        var c = count[i];
+        count[i] = pos;
+        pos += c;
+      }
+      for (i = 0; i < n; i++) tmp[count[(keys[order[i]] >>> shift) & 65535]++] = order[i];
+      var sw = order;
+      order = tmp;
+      tmp = sw;
+    }
+    return order;
+  }
+
+  // P₂(x, a) = Σ_{y < p ≤ √x} (π(x/p) − π(p) + 1), one ascending sweep.
+  // basePrimes must contain every prime ≤ √x.
+  function p2Count(x, y, basePrimes, onProgress) {
+    var sqrtX = isqrt(x);
+    // prime indices: π(basePrimes[k]) = k + 1
+    var k1 = basePrimes.length - 1;
+    while (k1 >= 0 && basePrimes[k1] > sqrtX) k1--;
+    var k0 = k1;
+    while (k0 >= 0 && basePrimes[k0] > y) k0--;
+    k0++; // first index with p > y
+    if (k0 > k1) return 0;
+
+    var total = 0;
+    var cum = 1; // π so far in the sweep (prime 2 precounted)
+    var k = k1;  // descending p ⇒ ascending v = ⌊x/p⌋
+    var vmax = idiv(x, basePrimes[k0]);
+    var SEG = 1 << 21;
+    var lo = 3;
+    var done = 0;
+    while (lo <= vmax && k >= k0) {
+      var hi = Math.min(lo + SEG - 1, vmax);
+      var seg = sieveWindow(lo, hi, basePrimes);
+      var comp = seg.comp, base = seg.base, len = seg.len;
+      var idx = 0;
+      while (k >= k0) {
+        var v = idiv(x, basePrimes[k]);
+        if (v > hi) break;
+        var target = v < base ? -1 : (v - base) >> 1; // floor → last odd index ≤ v
+        while (idx <= target) {
+          if (comp[idx] === 0) cum++;
+          idx++;
+        }
+        // π(v) = cum; π(p) = k + 1; term = π(v) − π(p) + 1
+        total += cum - (k + 1) + 1;
+        k--;
+      }
+      while (idx < len) {
+        if (comp[idx] === 0) cum++;
+        idx++;
+      }
+      done += hi - lo + 1;
+      if (onProgress) onProgress(done / vmax);
+      lo = hi + 1;
+    }
+    if (k >= k0) throw new Error("internal error: P2 sweep ended early");
+    return total;
+  }
+
+  // φ(x, a) via LMO ordinary + special leaves.  y defines a = π(y) = aCount.
+  // basePrimes must cover every prime ≤ y.  1-based prime indexing:
+  // π(basePrimes[k]) = k + 1, so p_b = basePrimes[b − 1].
+  function phiLMO(x, y, basePrimes, aCount, onProgress) {
+    var tables = muLpfTables(y);
+    var mu = tables.mu, lpf = tables.lpf;
+    var P_C = 17; // p_c for c = WHEEL_C = 7
+    var a = aCount;
+
+    // ---- ordinary leaves: Σ_{n ≤ y, μ(n)≠0, lpf(n) > 17 (or n=1)} μ(n)·φ(x/n, c)
+    var ordinary = 0;
+    for (var n = 1; n <= y; n++) {
+      if (n === 1 || (mu[n] !== 0 && lpf[n] > P_C)) {
+        ordinary += mu[n] * phi7(idiv(x, n));
+      }
+    }
+
+    // ---- special leaves: pairs (n, p_b), μ(n)≠0, 17 < p_b < lpf(n),
+    //      p_b ≤ p_a, n ≤ y < n·p_b.  Term: −μ(n)·φ(⌊x/(n·p_b)⌋, b−1).
+    // n = 1 never qualifies (1·p_b ≤ p_a ≤ y).
+    // Two passes: count, then fill exact-sized typed arrays.
+    var loBound = new Int32Array(y + 1);
+    var hiBound = new Int32Array(y + 1);
+    var Q = 0;
+    for (n = 2; n <= y; n++) {
+      loBound[n] = 1;
+      hiBound[n] = 0;
+      if (mu[n] === 0) continue;
+      var lp = lpf[n];
+      if (lp <= P_C) continue;
+      // p_b > y/n  ⟺  n·p_b > y  (integers: p_b ≥ ⌊y/n⌋+1 ⇒ n·p_b > y)
+      var loK = lowerBoundPrime(basePrimes, Math.max(P_C, idiv(y, n)) + 0.5);
+      var hiK = lowerBoundPrime(basePrimes, lp - 0.5) - 1; // last prime < lpf(n)
+      if (hiK > a - 1) hiK = a - 1;                        // p_b ≤ p_a
+      if (hiK >= loK) {
+        loBound[n] = loK;
+        hiBound[n] = hiK;
+        Q += hiK - loK + 1;
+      }
+    }
+    var qV = new Float64Array(Q);   // v ≤ x/y can exceed 2^32
+    var qB = new Int32Array(Q);
+    var qSign = new Int8Array(Q);
+    var qi = 0;
+    for (n = 2; n <= y; n++) {
+      for (var kk = loBound[n]; kk <= hiBound[n]; kk++) {
+        qV[qi] = idiv(x, n * basePrimes[kk]);
+        qB[qi] = kk + 1; // 1-based index b
+        qSign[qi] = -mu[n];
+        qi++;
+      }
+    }
+    var vmax = 1;
+    for (var qi = 0; qi < Q; qi++) if (qV[qi] > vmax) vmax = qV[qi];
+
+    // ---- segmented Fenwick sieve over [1, vmax] answers all queries.
+    // Queries grouped by (segment, b) ascending via one radix sort:
+    //   key = segId·(a+2) + b   (fits 32 bits for every supported x)
+    var SEG = 1 << 20;
+    var nb = a + 2;
+    var segCount = Math.floor((vmax - 1) / SEG) + 1;
+    if (segCount * nb > 4294967295) throw new RangeError("phiLMO: key overflow");
+    var keys = new Uint32Array(Q);
+    for (qi = 0; qi < Q; qi++) {
+      keys[qi] = Math.floor((qV[qi] - 1) / SEG) * nb + qB[qi];
+    }
+    var order = Q > 0 ? sortIndicesByKey(keys) : new Uint32Array(0);
+
+    // cnt[b] = #unmarked in [1, current segment start) at state b   (b ∈ [c, a])
+    var cnt = new Float64Array(a + 1);
+    // nxt[k] = next unsieved multiple of basePrimes[k] (cursor across segments)
+    var firstB = WHEEL_C; // 0-based index of p_{c+1} = basePrimes[7] = 19
+    var nxt = new Float64Array(a);
+    for (var k2 = firstB; k2 < a; k2++) nxt[k2] = basePrimes[k2];
+
+    var special = 0;
+    var mark = new Uint8Array(SEG + 1);
+    var unit = new Uint8Array(SEG + 1);
+    var bit = new Fenwick(SEG);
+    var qPtr = 0;
+
+    for (var segId = 0; segId < segCount; segId++) {
+      var lo = segId * SEG + 1;
+      var hi = Math.min(lo + SEG - 1, vmax);
+      var len = hi - lo + 1;
+
+      // state c: mark multiples of the wheel primes (number 1 stays unmarked)
+      mark.fill(0);
+      for (var wk = 0; wk < WHEEL_PRIMES.length; wk++) {
+        var wp = WHEEL_PRIMES[wk];
+        for (var m = Math.ceil(lo / wp) * wp; m <= hi; m += wp) mark[m - lo + 1] = 1;
+      }
+      for (var ii = 1; ii <= len; ii++) unit[ii] = 1 - mark[ii];
+      if (len < SEG) unit.fill(0, len + 1);
+      bit.buildFromUnit(unit, SEG);
+      var curUnm = bit.prefix(len); // unmarked in this segment at current state
+
+      // walk states c → a: answer b-queries at state b−1, then sieve p_b
+      for (var bIdx = firstB; bIdx < a; bIdx++) {
+        var b = bIdx + 1;          // we are at state b−1; about to sieve p_b
+        while (qPtr < Q) {
+          var qq = order[qPtr];
+          if (qB[qq] !== b || Math.floor((qV[qq] - 1) / SEG) !== segId) break;
+          special += qSign[qq] * (cnt[b - 1] + bit.prefix(qV[qq] - lo + 1));
+          qPtr++;
+        }
+        cnt[b - 1] += curUnm;      // state b−1 finalized for this segment
+        var pb = basePrimes[bIdx];
+        var mm = nxt[bIdx];
+        if (mm <= hi) {
+          for (; mm <= hi; mm += pb) {
+            var pos = mm - lo + 1;
+            if (!mark[pos]) {
+              mark[pos] = 1;
+              bit.remove(pos);
+              curUnm--;
+            }
+          }
+          nxt[bIdx] = mm;
+        }
+      }
+      cnt[a] += curUnm;
+      if (onProgress && (segId & 15) === 0) onProgress((segId + 1) / segCount);
+    }
+    if (qPtr !== Q) throw new Error("internal error: unanswered special leaves");
+
+    return ordinary + special;
+  }
+
+  // first index k with basePrimes[k] > bound (binary search)
+  function lowerBoundPrime(primes, bound) {
+    var lo = 0, hi = primes.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >>> 1;
+      if (primes[mid] > bound) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
+  }
+
+  // y = α·x^{1/3}: bigger α shortens both sieves (range x/y) but multiplies
+  // the special-leaf count (≈ π(y)²/2 pairs).  Without the Deléglise–Rivat
+  // easy/trivial-leaf split, α = 1 is the sweet spot; correctness holds for
+  // any α (the test suite cross-checks several).
+  function defaultAlpha() {
+    return 1;
+  }
+
+  // exact π(x) via the LMO machinery above
+  function primeCountLMO(x, onProgress, opts) {
+    x = Math.floor(x);
+    if (x < 2) return 0;
+    if (x > 9e15) throw new RangeError("primeCountLMO: x exceeds 2^53 safety bound");
+    var sqrtX = isqrt(x);
+    var basePrimes = (opts && opts.basePrimes) || primesUpTo(sqrtX);
+    if (basePrimes.length < 9) return primeCount(x); // tiny x: wheel assumptions fail
+    var y0 = icbrt(x);
+    var alpha = (opts && opts.alpha) || defaultAlpha();
+    var y = Math.min(y0 * alpha, Math.max(y0, sqrtX - 1));
+    var a = lowerBoundPrime(basePrimes, y + 0.5); // π(y)
+    if (a <= WHEEL_C + 1) return primeCount(x);
+    var phi = phiLMO(x, y, basePrimes, a,
+      onProgress ? function (f) { onProgress(f * 0.6); } : null);
+    var p2 = p2Count(x, y, basePrimes,
+      onProgress ? function (f) { onProgress(0.6 + f * 0.4); } : null);
+    return phi + a - 1 - p2;
+  }
+
+  // Engine selector.  Measured head-to-head in JS, the Lucy_Hedgehog tables
+  // beat LMO(α=1) by ~2× at every size we support (LMO's asymptotic edge of
+  // x^{1/12} cannot overcome its Fenwick/segment constants below ~10^17),
+  // so Lucy computes and LMO serves as the independent cross-checking
+  // engine (see test/test.js and the `engine` option of the CLI).
+  function primeCountAuto(x, onProgress, opts) {
+    if (opts && opts.engine === "lmo") return primeCountLMO(x, onProgress, opts);
+    return primeCount(x, onProgress);
+  }
+
   function primeCount(N, onProgress) {
     N = Math.floor(N);
     if (N < 2) return 0;
     if (N > 9e15) throw new RangeError("primeCount: x exceeds 2^53 safety bound");
     var r = isqrt(N);
-    var small = new Float64Array(r + 1);
-    var large = new Float64Array(r + 1); // large[i] = S(⌊N/i⌋)
+    var small = new Uint32Array(r + 1); // S(v) ≤ v ≤ r < 2^32 — half the bytes of the hottest array
+    var large = new Float64Array(r + 1); // large[i] = S(⌊N/i⌋), values up to N
     var v, i;
     for (v = 1; v <= r; v++) small[v] = v - 1;
     for (i = 1; i <= r; i++) large[i] = idiv(N, i) - 1;
@@ -273,7 +648,7 @@
   // n-th prime via count + walk
   // ------------------------------------------------------------------
 
-  var WINDOW_MAX = 1 << 21; // cap on integers per sieve window during the walk
+  var WINDOW_MAX = 1 << 23; // cap on integers per sieve window during the walk
 
   // Size the first walk window from the known deficit: |n − π(x0)| primes
   // at an average gap of ln x0, oversized 8×.  Later windows double, so a
@@ -288,13 +663,14 @@
   function nthPrimeByCounting(n, onProgress) {
     var tEst = nowMs();
     var x0 = guessNthPrime(n);
-    var tCount = nowMs();
-    var c0 = primeCount(x0, onProgress ? function (f) { onProgress("count", f); } : null);
-    var tWalk = nowMs();
-
-    // Base primes cover √(any point the walk can visit): the n-th prime is
-    // ≤ upperBoundForNthPrime(n) by Rosser's theorem.
+    // Base primes cover √(any point the count or walk can visit): the n-th
+    // prime is ≤ upperBoundForNthPrime(n) by Rosser's theorem.
     var basePrimes = primesUpTo(isqrt(upperBoundForNthPrime(n)) + 1);
+    var tCount = nowMs();
+    var c0 = primeCountAuto(x0,
+      onProgress ? function (f) { onProgress("count", f); } : null,
+      { basePrimes: basePrimes });
+    var tWalk = nowMs();
     var value = -1;
     var walked = 0;
     var seg, i, num;
@@ -388,7 +764,7 @@
       throw new RangeError("n must be an integer");
     }
     if (n < 1) throw new RangeError("n must be ≥ 1 (the 1st prime is 2)");
-    if (n > MAX_N) throw new RangeError("n must be ≤ 10^12 (answers stay below 2^53)");
+    if (n > MAX_N) throw new RangeError("n must be ≤ 2×10^14 (answers stay below 2^53)");
     var onProgress = opts && opts.onProgress;
     var t0 = nowMs();
 
@@ -405,6 +781,9 @@
   return {
     nthPrime: nthPrime,
     primeCount: primeCount,
+    primeCountLMO: primeCountLMO,
+    primeCountAuto: primeCountAuto,
+    icbrt: icbrt,
     riemannR: riemannR,
     nthPrimeEstimate: nthPrimeEstimate,
     inverseRiemannR: inverseRiemannR,

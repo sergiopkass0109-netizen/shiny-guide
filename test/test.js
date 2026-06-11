@@ -15,13 +15,15 @@
  *   8. Input validation errors.
  *
  * Run:  node test/test.js          (~ a few seconds)
- *       node test/test.js --slow   (adds n = 10^10, 10^11 and π(10^12); minutes)
+ *       node test/test.js --slow   (adds 10^10..10^12 anchors + big cross-engine checks; ~1 min)
+ *       node test/test.js --huge   (adds p(10^13) and π(10^14), both engines; several minutes)
  */
 "use strict";
 
 var NP = require("../nthprime.js");
 
-var SLOW = process.argv.indexOf("--slow") !== -1;
+var SLOW = process.argv.indexOf("--slow") !== -1 || process.argv.indexOf("--huge") !== -1;
+var HUGE = process.argv.indexOf("--huge") !== -1;
 var failures = 0;
 var checks = 0;
 
@@ -166,8 +168,9 @@ section("nthPrime vs published 10^k-th primes (OEIS A006988)");
   if (SLOW) {
     P10[10] = 252097800623;
     P10[11] = 2760727302517;
+    P10[12] = 29996224275833;
   }
-  for (var k = 1; k <= (SLOW ? 11 : 9); k++) {
+  for (var k = 1; k <= (SLOW ? 12 : 9); k++) {
     var t0 = Date.now();
     var res = NP.nthPrime(Math.pow(10, k));
     eq(res.value, P10[k], "p(10^" + k + ")");
@@ -228,7 +231,7 @@ section("input validation");
   throws(function () { NP.nthPrime(1.5); }, "n = 1.5");
   throws(function () { NP.nthPrime(NaN); }, "n = NaN");
   throws(function () { NP.nthPrime(Infinity); }, "n = Infinity");
-  throws(function () { NP.nthPrime(1e12 + 1); }, "n = 10^12 + 1");
+  throws(function () { NP.nthPrime(2e14 + 1); }, "n = 2×10^14 + 1");
   eq(NP.nthPrime(1).value, 2, "n = 1");
   eq(NP.nthPrime(2).value, 3, "n = 2");
   eq(NP.nthPrime(12).value, 37, "n = 12 (last table entry)");
@@ -237,6 +240,49 @@ section("input validation");
 })();
 
 // ---------------------------------------------------------------- 9
+section("LMO engine agrees with Lucy_Hedgehog engine (independent algorithms)");
+(function () {
+  var t0 = Date.now();
+  // structured + random x, several α values — two fundamentally different
+  // counting algorithms must produce identical results everywhere
+  var xs = [89, 97, 100, 1009, 65536, 1e6, 1e6 + 3, 9999991, 1e8];
+  var seed = 987654321;
+  for (var i = 0; i < 20; i++) {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    xs.push(1000 + (seed % 999000000));
+  }
+  for (i = 0; i < xs.length; i++) {
+    var x = xs[i];
+    var a = NP.primeCount(x);
+    var b = NP.primeCountLMO(x);
+    if (a !== b) check(false, "engines disagree at x=" + x + ": lucy=" + a + " lmo=" + b);
+    if (i % 4 === 0) {
+      var c = NP.primeCountLMO(x, null, { alpha: 2 + (i % 5) });
+      if (a !== c) check(false, "lmo alpha variant disagrees at x=" + x);
+    }
+  }
+  check(true, xs.length + " cross-engine checks agree");
+  eq(NP.primeCountLMO(1e10), 455052511, "LMO π(10^10)");
+  console.log("  ok" + fmtMs(t0));
+  if (SLOW) {
+    var t1 = Date.now();
+    eq(NP.primeCountLMO(1e12), 37607912018, "LMO π(10^12)");
+    eq(NP.primeCountLMO(1e13), 346065536839, "LMO π(10^13)");
+    eq(NP.primeCount(1e13), 346065536839, "Lucy π(10^13)");
+    console.log("  big anchors ok" + fmtMs(t1));
+  }
+  if (HUGE) {
+    var t2 = Date.now();
+    eq(NP.nthPrime(1e13).value, 323780508946331, "p(10^13)  [OEIS A006988]");
+    console.log("  p(10^13) ok" + fmtMs(t2));
+    t2 = Date.now();
+    eq(NP.primeCount(1e14), 3204941750802, "Lucy π(10^14)");
+    eq(NP.primeCountLMO(1e14), 3204941750802, "LMO π(10^14)");
+    console.log("  π(10^14) both engines ok" + fmtMs(t2));
+  }
+})();
+
+// ---------------------------------------------------------------- 10
 section("index.html is self-contained and in sync (run `npm run build` if not)");
 (function () {
   var fs = require("fs");

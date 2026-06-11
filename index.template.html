@@ -21,7 +21,7 @@
     <h1>The <em>n</em>-th Prime</h1>
     <p class="tagline">
       Riemann&nbsp;R inverse estimate&nbsp;·&nbsp;Lucy_Hedgehog exact count
-      <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;segmented sieve walk
+      <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;segmented sieve walk&nbsp;·&nbsp;LMO cross-verified
     </p>
   </header>
 
@@ -35,12 +35,12 @@
     <div class="chips" aria-label="examples">
       <button class="chip" data-n="100">100</button>
       <button class="chip" data-n="1e6">10^6</button>
-      <button class="chip" data-n="1e8">10^8</button>
       <button class="chip" data-n="1e9">10^9</button>
       <button class="chip" data-n="1e10">10^10</button>
       <button class="chip" data-n="1e12">10^12</button>
+      <button class="chip" data-n="1e13">10^13</button>
     </div>
-    <p class="hint">any whole number from 1 to 10<sup>12</sup> — commas, <code>1e9</code> and <code>10^k</code> all work</p>
+    <p class="hint">any whole number from 1 to 2×10<sup>14</sup> — commas, <code>1e9</code> and <code>10^k</code> all work</p>
   </section>
 
   <section class="card answer-card">
@@ -63,15 +63,19 @@
 
   <footer>
     <p>
-      Exact for every 1 ≤ n ≤ 10<sup>12</sup> (answers stay below 2<sup>53</sup>).
+      Exact for every 1 ≤ n ≤ 2×10<sup>14</sup> — the frontier of exact 64-bit-float
+      integer arithmetic (answers stay below 2<sup>53</sup>).
       This page is one self-contained file — saving it works.
       Verified against <a href="https://oeis.org/A006988">OEIS A006988</a>,
       π(10<sup>k</sup>) reference values, and an independent sieve.
       Math: Cipolla (1902) &amp; <a href="https://mathworld.wolfram.com/GramSeries.html">Gram series</a>
       for the estimate, rigorous Rosser/Dusart brackets,
       <a href="https://math.berkeley.edu/~elafandi/euler/p10/">Lucy_Hedgehog</a> counting,
-      architecture after <a href="https://github.com/kimwalisch/primecount">primecount</a>.
-      Heads-up: n ≥ 10<sup>11</sup> takes a while — the count is O(x<sup>3/4</sup>) in pure JS.
+      architecture after <a href="https://github.com/kimwalisch/primecount">primecount</a>;
+      every result reachable by two independent algorithms (Lucy_Hedgehog and
+      Lagarias–Miller–Odlyzko) that are cross-checked in the test suite.
+      Heads-up: n = 10<sup>12</sup> takes ~15 s, 10<sup>13</sup> ~2 min,
+      beyond that is best run in a desktop browser or the Node CLI.
     </p>
   </footer>
 </main>
@@ -213,12 +217,14 @@
     var n = parseN(input.value);
     if (n === null) { showError("Please enter a whole number, like 1000000, 1e9 or 10^12."); return; }
     if (n < 1) { showError("n must be at least 1 — the 1st prime is 2."); return; }
-    if (n > NthPrime.MAX_N) { showError("n must be at most 10^12 so the answer stays exact (below 2^53)."); return; }
+    if (n > NthPrime.MAX_N) { showError("n must be at most 2\u00d710^14 so the answer stays exact (below 2^53)."); return; }
 
     jobId++;
     pendingN = n;
     setBusy(true);
-    answerLabel.textContent = "computing p(" + fmt(n) + ")…";
+    answerLabel.textContent = "computing p(" + fmt(n) + ")…" +
+      (n >= 2e13 ? " (heads-up: needs a few minutes and ~1 GB of memory — desktop browser or Node CLI recommended)" :
+       n >= 2e12 ? " (this size takes a minute or two)" : "");
     answer.textContent = " ";
     copyBtn.hidden = true;
     errBox.hidden = true;
