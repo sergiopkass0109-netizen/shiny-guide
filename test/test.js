@@ -263,12 +263,25 @@ section("LMO engine agrees with Lucy_Hedgehog engine (independent algorithms)");
   }
   check(true, xs.length + " cross-engine checks agree");
   eq(NP.primeCountLMO(1e10), 455052511, "LMO π(10^10)");
+  if (NP.wasmAvailable()) {
+    for (i = 0; i < xs.length; i += 2) {
+      var xw = xs[i];
+      var aw = NP.primeCount(xw);
+      var bw = NP.primeCountWasm(xw);
+      if (aw !== bw) check(false, "wasm disagrees at x=" + xw + ": js=" + aw + " wasm=" + bw);
+    }
+    eq(NP.primeCountWasm(1e10), 455052511, "WASM π(10^10)");
+    check(true, "compiled engine agrees (triple-engine verification)");
+  } else {
+    console.log("  (WebAssembly engine unavailable here — skipped)");
+  }
   console.log("  ok" + fmtMs(t0));
   if (SLOW) {
     var t1 = Date.now();
     eq(NP.primeCountLMO(1e12), 37607912018, "LMO π(10^12)");
     eq(NP.primeCountLMO(1e13), 346065536839, "LMO π(10^13)");
     eq(NP.primeCount(1e13), 346065536839, "Lucy π(10^13)");
+    if (NP.wasmAvailable()) eq(NP.primeCountWasm(1e13), 346065536839, "WASM π(10^13)");
     console.log("  big anchors ok" + fmtMs(t1));
   }
   if (HUGE) {
@@ -291,8 +304,10 @@ section("index.html is self-contained and in sync (run `npm run build` if not)")
   var html = fs.readFileSync(path.join(root, "index.html"), "utf8");
   var engine = fs.readFileSync(path.join(root, "nthprime.js"), "utf8").trim();
   var style = fs.readFileSync(path.join(root, "style.css"), "utf8").trim();
+  var wasmjs = fs.readFileSync(path.join(root, "engine-wasm.js"), "utf8").trim();
   check(html.indexOf(engine) !== -1, "index.html embeds current nthprime.js");
   check(html.indexOf(style) !== -1, "index.html embeds current style.css");
+  check(html.indexOf(wasmjs) !== -1, "index.html embeds current engine-wasm.js");
   check(html.indexOf("/*BUILD:") === -1, "no unreplaced build markers");
   check(html.indexOf("<script src=") === -1 && html.indexOf("<link rel=\"stylesheet\"") === -1,
     "no external file references");

@@ -562,13 +562,61 @@
     return phi + a - 1 - p2;
   }
 
+  // ------------------------------------------------------------------
+  // optional compiled engine (engine-wasm.js, generated from engine.c):
+  // the same verified Lucy recurrence, ~1.7× faster, near-native speed
+  // ------------------------------------------------------------------
+
+  var wasmMod = null, wasmTried = false;
+  function getWasmModule() {
+    if (wasmTried) return wasmMod;
+    wasmTried = true;
+    try {
+      var W = null;
+      if (typeof NthPrimeWasm !== "undefined") W = NthPrimeWasm; // inlined page / worker
+      else if (typeof require === "function") W = require("./engine-wasm.js"); // Node
+      if (W && W.init && W.init()) wasmMod = W;
+    } catch (e) {
+      wasmMod = null;
+    }
+    return wasmMod;
+  }
+
+  // exact π(x) on the compiled engine; null ⇒ unavailable (caller falls back)
+  function primeCountWasm(x, onProgress) {
+    var W = getWasmModule();
+    if (!W) return null;
+    var w = W.init();
+    var r = isqrt(x);
+    var smallOff = 1024;
+    var largeOff = smallOff + 4 * (r + 2);
+    largeOff += (8 - (largeOff % 8)) % 8; // u64 table must be 8-aligned
+    var need = largeOff + 8 * (r + 2) + 65536;
+    var have = w.memory.buffer.byteLength;
+    if (need > have) {
+      try { w.memory.grow(Math.ceil((need - have) / 65536)); }
+      catch (e) { return null; } // out of memory — JS engine takes over
+    }
+    W.setProgress(onProgress || null);
+    var v = Number(w.exports.pi_lucy(BigInt(x), smallOff, largeOff));
+    W.setProgress(null);
+    return v;
+  }
+
   // Engine selector.  Measured head-to-head in JS, the Lucy_Hedgehog tables
   // beat LMO(α=1) by ~2× at every size we support (LMO's asymptotic edge of
   // x^{1/12} cannot overcome its Fenwick/segment constants below ~10^17),
   // so Lucy computes and LMO serves as the independent cross-checking
   // engine (see test/test.js and the `engine` option of the CLI).
   function primeCountAuto(x, onProgress, opts) {
-    if (opts && opts.engine === "lmo") return primeCountLMO(x, onProgress, opts);
+    var eng = opts && opts.engine;
+    if (eng === "lmo") return primeCountLMO(x, onProgress, opts);
+    if (eng === "lucy" || eng === "js") return primeCount(x, onProgress);
+    if (eng === "wasm" || x >= 1e7) {
+      var v = primeCountWasm(x, onProgress);
+      if (v !== null) return v;
+      if (eng === "wasm") throw new Error("WebAssembly engine unavailable in this environment");
+    }
     return primeCount(x, onProgress);
   }
 
@@ -667,9 +715,14 @@
     // prime is ≤ upperBoundForNthPrime(n) by Rosser's theorem.
     var basePrimes = primesUpTo(isqrt(upperBoundForNthPrime(n)) + 1);
     var tCount = nowMs();
-    var c0 = primeCountAuto(x0,
-      onProgress ? function (f) { onProgress("count", f); } : null,
-      { basePrimes: basePrimes });
+    var cb = onProgress ? function (f) { onProgress("count", f); } : null;
+    var c0 = null;
+    var engineName = "Lucy_Hedgehog/JS";
+    if (x0 >= 1e7 && getWasmModule()) {
+      c0 = primeCountWasm(x0, cb);
+      if (c0 !== null) engineName = "compiled C/WebAssembly";
+    }
+    if (c0 === null) c0 = primeCount(x0, cb);
     var tWalk = nowMs();
     var value = -1;
     var walked = 0;
@@ -733,7 +786,7 @@
     return {
       n: n,
       value: value,
-      method: "R-inverse estimate + Lucy_Hedgehog exact count + segmented sieve walk",
+      method: "R-inverse estimate + Lucy_Hedgehog exact count [" + engineName + "] + segmented sieve walk",
       guess: x0,
       piAtGuess: c0,
       offBy: n - c0, // primes between guess and answer (sign = direction)
@@ -782,7 +835,9 @@
     nthPrime: nthPrime,
     primeCount: primeCount,
     primeCountLMO: primeCountLMO,
+    primeCountWasm: primeCountWasm,
     primeCountAuto: primeCountAuto,
+    wasmAvailable: function () { return !!getWasmModule(); },
     icbrt: icbrt,
     riemannR: riemannR,
     nthPrimeEstimate: nthPrimeEstimate,

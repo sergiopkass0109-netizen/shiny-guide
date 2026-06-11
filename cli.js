@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* Command-line interface:
  *   node cli.js <n> [--json]            n-th prime, 1 ≤ n ≤ 2×10^14
- *   node cli.js --pi <x> [--engine lucy|lmo|both]   exact π(x)
+ *   node cli.js --pi <x> [--engine lucy|lmo|wasm|all]   exact π(x)
  * Numbers accept 1234567, 1,234,567, 1_000_000, 1e9 and 10^12 forms. */
 "use strict";
 
@@ -43,7 +43,7 @@ if (piMode) {
     process.exit(2);
   }
   var t0 = Date.now();
-  if (engine === "both") {
+  if (engine === "both" || engine === "all") {
     var va = NP.primeCount(x);
     var ta = Date.now() - t0;
     t0 = Date.now();
@@ -53,10 +53,20 @@ if (piMode) {
       "  [lucy " + ta + " ms]");
     console.log("pi(" + x.toLocaleString("en-US") + ") = " + vb.toLocaleString("en-US") +
       "  [lmo  " + tb + " ms]");
-    console.log(va === vb ? "engines agree ✓" : "*** ENGINES DISAGREE — please report this x ***");
-    process.exit(va === vb ? 0 : 1);
+    var allAgree = va === vb;
+    if (engine === "all" && NP.wasmAvailable()) {
+      t0 = Date.now();
+      var vc = NP.primeCountWasm(x);
+      console.log("pi(" + x.toLocaleString("en-US") + ") = " + vc.toLocaleString("en-US") +
+        "  [wasm " + (Date.now() - t0) + " ms]");
+      allAgree = allAgree && vc === va;
+    }
+    console.log(allAgree ? "engines agree ✓" : "*** ENGINES DISAGREE — please report this x ***");
+    process.exit(allAgree ? 0 : 1);
   }
-  var val = engine === "lmo" ? NP.primeCountLMO(x) : NP.primeCount(x);
+  var val = engine === "lmo" ? NP.primeCountLMO(x)
+          : engine === "wasm" ? NP.primeCountWasm(x)
+          : NP.primeCount(x);
   console.log("pi(" + x.toLocaleString("en-US") + ") = " + val.toLocaleString("en-US") +
     "  [" + engine + " " + (Date.now() - t0) + " ms]");
   process.exit(0);

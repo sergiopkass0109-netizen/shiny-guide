@@ -1,15 +1,17 @@
 # The *n*-th Prime
 
 Type a number **n** into the box, get back the **n-th prime number** — exactly,
-for any **1 ≤ n ≤ 2×10¹⁴**, in a self-contained web page with zero dependencies.
+for any **1 ≤ n ≤ 2×10¹⁴**, in a self-contained web page with zero dependencies —
+counting on a **compiled C/WebAssembly core** at near-native speed, verified by
+**three independent engines**.
 
 ```
 p(10⁶)    =             15,485,863       ~10 ms
-p(10⁹)    =         22,801,763,489      ~100 ms     (the billionth prime)
-p(10¹²)   =     29,996,224,275,833       ~14 s      (the trillionth prime)
-p(10¹³)   =    323,780,508,946,331       ~85 s
-p(10¹⁴)   =  3,475,385,758,524,527       ~7 min     (matches OEIS A006988)
-p(2×10¹⁴) =  7,093,600,525,704,677      ~13 min     (the float64 frontier)
+p(10⁹)    =         22,801,763,489       ~90 ms     (the billionth prime)
+p(10¹²)   =     29,996,224,275,833       ~9 s       (the trillionth prime)
+p(10¹³)   =    323,780,508,946,331      ~55 s
+p(10¹⁴)   =  3,475,385,758,524,527       ~5 min     (matches OEIS A006988)
+p(2×10¹⁴) =  7,093,600,525,704,677       ~9 min     (the float64 frontier)
 ```
 
 *(Node 22, single thread, pure JavaScript — run `npm run bench` yourself.
@@ -65,25 +67,34 @@ The guess is clamped into the **rigorous bracket**
 n(ln n + ln ln n − 1) ≤ p(n) < n(ln n + ln ln n) (Dusart / Rosser), so a wild
 estimate can never produce a wrong answer — only a slower one.
 
-### 2. Count — exact π at the guess
+### 2. Count — exact π at the guess, on three engines
 
-**Primary engine — Lucy_Hedgehog's algorithm** (O(x^¾) time, O(√x) space):
-a dynamic programme over the ≤ 2√x distinct values of ⌊x/k⌋, with the
-recurrence `S(v) ← S(v) − [S(⌊v/p⌋) − π(p−1)]`. No factoring, no primality
-tests. Implemented with blocked updates over typed arrays (`Uint32` for the
-hot table) — measured ~10¹⁰ recurrence steps/second.
+**Speed engine — Lucy_Hedgehog's algorithm compiled from C to WebAssembly**
+(O(x^¾) time, O(√x) space): a dynamic programme over the ≤ 2√x distinct
+values of ⌊x/k⌋ with the recurrence `S(v) ← S(v) − [S(⌊v/p⌋) − π(p−1)]`.
+The C core (`engine.c`, ~60 lines, zero libc) ships as a 1.8 KB wasm module
+embedded base64 in the page; steady-state it runs ~1.5× faster than the JS
+engine. A performance lesson we measured the hard way: a naive C port was
+*slower* than JavaScript (0.7×), because this algorithm is bound by 64-bit
+integer division (~25–40 cycles each). The fix — in both languages — is
+pipelined *double* division with a proof of exactness below 2⁵³. V8's JIT
+had been applying that trick all along; C had to be taught it.
 
-**Verification engine — Lagarias–Miller–Odlyzko (1985)**, the algorithm family
+**Reference engine — the same algorithm in pure JavaScript**, used as the
+automatic fallback wherever WebAssembly is unavailable, and as engine #2 in
+verification.
+
+**Verification engine #3 — Lagarias–Miller–Odlyzko (1985)**, the algorithm family
 behind every prime-counting world record: π(x) = φ(x,a) + a − 1 − P₂(x,a),
 with φ split into *ordinary leaves* (Möbius-weighted wheel counts) and
 *special leaves* (answered by a segmented sieve with a Fenwick tree), and P₂
 folded into one ascending segmented sweep. To our knowledge this is the
 **first complete LMO implementation that runs inside a web page**.
 
-The twist: in JavaScript, measured head-to-head, Lucy's lower constants beat
-LMO(α=1) ~2× at every size below ~10¹⁷ — so Lucy computes your answer, and
-LMO's job is *proof*: two unrelated algorithms, two unrelated bug surfaces,
-agreeing digit-for-digit (`node cli.js --pi 1e13 --engine both`).
+Measured head-to-head, Lucy's constants beat LMO(α=1) ~2× at every size
+below ~10¹⁷ — so Lucy computes your answer and LMO's job is *proof*: an
+unrelated algorithm with an unrelated bug surface, agreeing digit-for-digit.
+Run all three: `node cli.js --pi 1e12 --engine all`.
 
 ### 3. Walk — segmented sieve over the tiny gap
 
@@ -104,8 +115,8 @@ Milliseconds.
 6. |R(x) − π(x)| ≪ √x (guards the Gram series / ζ implementation);
 7. estimates always inside the rigorous Rosser/Dusart bracket;
 8. input-validation edge cases;
-9. **Lucy vs LMO cross-engine agreement** on structured + random x and
-   several α values — the flagship check;
+9. **triple-engine agreement** (compiled wasm vs JS Lucy vs LMO) on
+   structured + random x and several α values — the flagship check;
 10. the self-contained `index.html` embeds the current engine byte-for-byte.
 
 Top-end results verified this way: π(10¹³) = 346,065,536,839 and
@@ -160,6 +171,9 @@ npm run bench       # timing table; --big / --huge tiers
 | `style.css` | styling (inlined at build) |
 | `nthprime.js` | both engines + estimate + walk (inlined at build; Node-ready) |
 | `build.js` | `npm run build` regenerates index.html |
+| `engine.c` | the C core — Lucy counting for wasm32 |
+| `wasmbuild.js` | `npm run build:wasm` — clang → engine.wasm → engine-wasm.js |
+| `engine-wasm.js` | **generated** base64-embedded wasm loader (committed so clang isn't required) |
 | `cli.js` | nth-prime and π(x) command line |
 | `test/test.js` | the verification suite |
 | `bench.js` | timing table |

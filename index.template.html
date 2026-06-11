@@ -21,7 +21,7 @@
     <h1>The <em>n</em>-th Prime</h1>
     <p class="tagline">
       Riemann&nbsp;R inverse estimate&nbsp;·&nbsp;Lucy_Hedgehog exact count
-      <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;segmented sieve walk&nbsp;·&nbsp;LMO cross-verified
+      <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;compiled C/WebAssembly core&nbsp;·&nbsp;triple-engine verified
     </p>
   </header>
 
@@ -80,6 +80,9 @@
   </footer>
 </main>
 
+<script id="engine-wasm-src">
+/*BUILD:WASM*/
+</script>
 <script id="engine-src">
 /*BUILD:ENGINE*/
 </script>
@@ -159,7 +162,8 @@
   function getWorker() {
     if (worker !== null) return worker;
     try {
-      var src = document.getElementById("engine-src").textContent +
+      var src = document.getElementById("engine-wasm-src").textContent + "\n" +
+        document.getElementById("engine-src").textContent +
         "\nself.onmessage = function (e) {" +
         "  var id = e.data.id, n = e.data.n;" +
         "  try {" +
