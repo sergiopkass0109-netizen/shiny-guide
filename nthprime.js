@@ -693,6 +693,78 @@
   }
 
   // ------------------------------------------------------------------
+  // deterministic POLYNOMIAL-TIME primality test (Miller–Rabin, BigInt)
+  // ------------------------------------------------------------------
+  //
+  // Testing whether m is prime runs in O(d³) bit operations where d is the
+  // number of DIGITS of m — genuinely polynomial time in the input size
+  // (the same complexity class as AKS, with far better constants).  It is
+  // deterministic — a proof, not a probability — for every
+  // m < 3,317,044,064,679,887,385,961,981 ≈ 3.3×10²⁴ using the first 13
+  // prime witnesses (Sorenson & Webster, Math. Comp. 85, 2016).
+  //
+  // Note the contrast documented in the README: FINDING the n-th prime in
+  // time polynomial in the digits of n is an open problem in mathematics;
+  // TESTING a given number is polynomial and implemented right here.
+
+  var BI0, BI1, BI2, MR_LIMIT, MR_WITNESSES;
+  function initBigints() {
+    if (BI0 !== undefined) return true;
+    if (typeof BigInt === "undefined") return false;
+    BI0 = BigInt(0);
+    BI1 = BigInt(1);
+    BI2 = BigInt(2);
+    MR_LIMIT = BigInt("3317044064679887385961981");
+    MR_WITNESSES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41].map(BigInt);
+    return true;
+  }
+
+  function modpow(b, e, m) {
+    var r = BI1;
+    b %= m;
+    while (e > BI0) {
+      if (e % BI2 === BI1) r = (r * b) % m;
+      b = (b * b) % m;
+      e /= BI2;
+    }
+    return r;
+  }
+
+  var TRIAL_PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97];
+
+  // isPrime(m) → { prime: bool, factor?: string }  for 0 ≤ m < 3.3×10²⁴.
+  // Accepts Number, BigInt, or a numeric string of any length in range.
+  function isPrime(input) {
+    if (!initBigints()) throw new Error("BigInt unavailable in this environment");
+    var m = typeof input === "bigint" ? input : BigInt(String(input).trim());
+    if (m < BI2) return { prime: false, reason: "primes start at 2" };
+    if (m >= MR_LIMIT) throw new RangeError("primality test is deterministic only below 3.3×10^24");
+    var i, p;
+    for (i = 0; i < TRIAL_PRIMES.length; i++) {
+      p = BigInt(TRIAL_PRIMES[i]);
+      if (m === p) return { prime: true };
+      if (m % p === BI0) return { prime: false, factor: String(TRIAL_PRIMES[i]) };
+    }
+    // m odd, no factor ≤ 97 — write m−1 = d·2^s and run the witness set
+    var d = m - BI1;
+    var s = 0;
+    while (d % BI2 === BI0) { d /= BI2; s++; }
+    for (i = 0; i < MR_WITNESSES.length; i++) {
+      var a = MR_WITNESSES[i] % m;
+      if (a === BI0) continue;
+      var x = modpow(a, d, m);
+      if (x === BI1 || x === m - BI1) continue;
+      var composite = true;
+      for (var r = 1; r < s; r++) {
+        x = (x * x) % m;
+        if (x === m - BI1) { composite = false; break; }
+      }
+      if (composite) return { prime: false, witness: String(MR_WITNESSES[i]) };
+    }
+    return { prime: true };
+  }
+
+  // ------------------------------------------------------------------
   // n-th prime via count + walk
   // ------------------------------------------------------------------
 
@@ -833,6 +905,7 @@
 
   return {
     nthPrime: nthPrime,
+    isPrime: isPrime,
     primeCount: primeCount,
     primeCountLMO: primeCountLMO,
     primeCountWasm: primeCountWasm,

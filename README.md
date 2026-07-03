@@ -43,6 +43,39 @@ with decades of optimization is faster than any web page; this is the same
 mathematics brought to a place it has never been deployed — a single
 self-contained HTML file you can save, open offline, and audit.
 
+## Scaling: sublinear, measured — and the polynomial-time question
+
+**How does time grow as n grows?** Not exponentially — not even linearly.
+The count step costs ~p(n)^¾ ≈ (n ln n)^¾, so a 10× larger n costs about
+5.6× more time, forever. Measured on this machine:
+
+| step up | time ratio | linear would be | exponential would be |
+|---|---|---|---|
+| 10¹² → 10¹³ | 6.1× | 10× | astronomically worse |
+| 10¹³ → 10¹⁴ | 5.5× | 10× | astronomically worse |
+| 10¹⁴ → 2×10¹⁴ | 1.8× | 2× | — |
+
+Run `npm run bench` and read the `scaling` column: it prints the measured
+exponent e in *time ∝ nᵉ* between tiers — consistently ≈ 0.78, i.e.
+**sublinear**. (In fact every named algorithm here is a polynomial-in-n
+algorithm; the field's open frontier is different — see below.)
+
+**And "polynomial time" in the computer-science sense?** There the input
+size is the number of *digits* d of n, and the honest state of mathematics
+(checked against the 2026 literature) is:
+
+* **Testing** whether a given number is prime in poly(d) time: **solved**
+  (AKS 2002; deterministic Miller–Rabin below 3.3×10²⁴ — Sorenson & Webster
+  2016). *Implemented in this project*: end any number with `?` in the box,
+  or `NP.isPrime("4999999999999999999999")` — answers in O(d³), instantly,
+  up to 3.3×10²⁴, a billion times beyond the calculator's own range.
+* **Finding** the n-th prime (or even *any* d-digit prime, deterministically)
+  in poly(d) time: **open problem** — the Polymath 4 project ("Finding
+  primes", 2009–2012) attacked exactly this and it remains unsolved. The
+  best known exact-π(x) theory (Lagarias–Odlyzko analytic, ~x^½) is still
+  exponential in d. Anyone who solves it gets a very famous paper, and this
+  README will be delighted to cite them.
+
 ## The mathematics (three stages + a twist)
 
 ### 1. Estimate — Riemann's R function, inverted

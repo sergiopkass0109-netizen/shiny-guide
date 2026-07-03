@@ -40,7 +40,9 @@
       <button class="chip" data-n="1e12">10^12</button>
       <button class="chip" data-n="1e13">10^13</button>
     </div>
-    <p class="hint">any whole number from 1 to 2×10<sup>14</sup> — commas, <code>1e9</code> and <code>10^k</code> all work</p>
+    <p class="hint">any whole number from 1 to 2×10<sup>14</sup> — commas, <code>1e9</code> and <code>10^k</code> all work.
+    Or ask if a specific number is prime: end it with <code>?</code> (e.g. <code>4999999999999999999999?</code>) —
+    deterministic up to 3.3×10<sup>24</sup>, answered in polynomial time</p>
   </section>
 
   <section class="card answer-card">
@@ -216,8 +218,40 @@
     }, 30);
   }
 
+  function groupDigits(s) {
+    return s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function checkPrimality(raw) {
+    var digits = raw.replace(/[,_\s]/g, "");
+    if (!/^\d{1,25}$/.test(digits)) {
+      showError("For a primality check, give plain digits followed by ? (up to 25 digits).");
+      return;
+    }
+    try {
+      var t0 = performance.now ? performance.now() : Date.now();
+      var res = NthPrime.isPrime(digits);
+      var ms = (performance.now ? performance.now() : Date.now()) - t0;
+      errBox.hidden = true;
+      stats.hidden = true;
+      copyBtn.hidden = true;
+      answer.textContent = res.prime ? "PRIME ✓" : "not prime";
+      answerLabel.textContent = groupDigits(digits) + " — " +
+        (res.prime ? "certified prime" :
+         res.factor ? "composite (divisible by " + res.factor + ")" : "composite") +
+        " · deterministic Miller–Rabin, polynomial time O(d³) in the d digits · " +
+        (ms < 1 ? "<1" : Math.round(ms)) + " ms";
+    } catch (err) {
+      showError(String((err && err.message) || err));
+    }
+  }
+
   function compute() {
     if (running) return;
+    if (/\?\s*$/.test(input.value)) {
+      checkPrimality(input.value.replace(/\?\s*$/, ""));
+      return;
+    }
     var n = parseN(input.value);
     if (n === null) { showError("Please enter a whole number, like 1000000, 1e9 or 10^12."); return; }
     if (n < 1) { showError("n must be at least 1 — the 1st prime is 2."); return; }

@@ -296,6 +296,40 @@ section("LMO engine agrees with Lucy_Hedgehog engine (independent algorithms)");
 })();
 
 // ---------------------------------------------------------------- 10
+section("deterministic polynomial-time primality test (isPrime)");
+(function () {
+  // exhaustive agreement with trial division on [0, 2000]
+  function slow(x) {
+    if (x < 2) return false;
+    for (var d = 2; d * d <= x; d++) if (x % d === 0) return false;
+    return true;
+  }
+  for (var x = 0; x <= 2000; x++) {
+    if (NP.isPrime(x).prime !== slow(x)) { check(false, "isPrime(" + x + ") wrong"); return; }
+  }
+  check(true, "matches trial division on 0..2000");
+  // Carmichael numbers fool Fermat tests — must not fool Miller–Rabin
+  var carmichael = [561, 1105, 1729, 2465, 41041, 825265];
+  for (var i = 0; i < carmichael.length; i++) {
+    check(NP.isPrime(carmichael[i]).prime === false, "Carmichael " + carmichael[i] + " is composite");
+  }
+  // primes this project itself computed and anchored against OEIS
+  check(NP.isPrime(22801763489).prime === true, "p(10^9) is prime");
+  check(NP.isPrime(29996224275833).prime === true, "p(10^12) is prime");
+  check(NP.isPrime("3475385758524527").prime === true, "p(10^14) is prime (string input)");
+  // Mersenne prime 2^61 − 1, far beyond the calculator range
+  check(NP.isPrime("2305843009213693951").prime === true, "2^61−1 is prime");
+  check(NP.isPrime("2305843009213693953").prime === false, "2^61+1 is composite");
+  check(NP.isPrime(15485865).factor === "3", "factor reporting (smallest factor)");
+  check(NP.isPrime(1).prime === false, "1 is not prime");
+  function throwsRange(fn, label) {
+    try { fn(); check(false, label + " did not throw"); }
+    catch (e) { check(e instanceof RangeError, label + " throws RangeError"); }
+  }
+  throwsRange(function () { NP.isPrime("3400000000000000000000000"); }, "beyond 3.3e24");
+})();
+
+// ---------------------------------------------------------------- 11
 section("index.html is self-contained and in sync (run `npm run build` if not)");
 (function () {
   var fs = require("fs");

@@ -26,13 +26,13 @@ var engine = "lucy";
 var engIdx = args.indexOf("--engine");
 if (engIdx !== -1) engine = args[engIdx + 1] || "lucy";
 var positional = args.filter(function (a, i) {
-  return a !== "--json" && a !== "--pi" && a !== "--engine" && i !== engIdx + 1;
+  return a !== "--json" && a !== "--pi" && a !== "--engine" && (engIdx === -1 || i !== engIdx + 1);
 });
 var nArg = positional[0];
 
 if (nArg === undefined) {
   console.error("usage: node cli.js <n> [--json]                   the n-th prime");
-  console.error("       node cli.js --pi <x> [--engine lucy|lmo|both]   exact pi(x)");
+  console.error("       node cli.js --pi <x> [--engine lucy|lmo|wasm|all]   exact pi(x)");
   process.exit(2);
 }
 
