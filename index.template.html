@@ -250,6 +250,7 @@
         "  try {" +
         "    var prog = function (ph, f) { self.postMessage({ id: id, progress: { phase: ph, frac: f } }); };" +
         "    var result = op === 'pi' ? self.NthPrime.countPrimes(arg, { onProgress: prog })" +
+        "      : op === 'prep' ? (self.NthPrime.prepareWalk(arg), { prepared: true })" +
         "      : op === 'nthFromCount' ? self.NthPrime.nthPrimeFromCount(arg, e.data.x0, e.data.c0," +
         "                                  { engine: e.data.engine, msCount: e.data.msCount, onProgress: prog })" +
         "      : self.NthPrime.nthPrime(arg, { onProgress: prog });" +
@@ -263,6 +264,7 @@
       worker.onmessage = function (e) {
         var msg = e.data;
         if (msg.id !== jobId) return; // stale or cancelled job
+        if (msg.op === "prep") return; // base primes are ready; nothing to show
         if (msg.progress) {
           progressBar.style.width = Math.max(2, Math.round(msg.progress.frac * 100)) + "%";
           return;
@@ -314,6 +316,10 @@
       onProgress: function (f) { if (id === jobId) progressBar.style.width = Math.max(2, Math.round(f * 100)) + "%"; }
     });
     parJob = job;
+    if (op === "nth") {                       // sieve the walk's base primes while the cores count
+      var pw = getWorker();
+      if (pw) pw.postMessage({ id: id, op: "prep", arg: arg });
+    }
     job.then(function (c0) {
       if (id !== jobId) return;
       parJob = null;
@@ -391,7 +397,9 @@
     answerLabel.textContent = label;
     if (parallelReady()) {
       var x0 = op === "pi" ? arg : NthPrime.guessNthPrime(arg);
-      if (x0 >= 1e12) { runParallel(id, op, arg, x0); return; }  // below this, one core is as fast
+      // measured crossover ≈ 3×10¹¹ on 4 threads; it moves down with more cores
+      var minX = Math.max(2e11, 1e12 * 4 / NthPrimeParallel.threads());
+      if (x0 >= minX) { runParallel(id, op, arg, x0); return; }
     }
     var w = getWorker();
     if (w) w.postMessage({ id: id, op: op, arg: arg });

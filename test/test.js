@@ -362,6 +362,9 @@ section("countPrimes + primeNeighbors (the page's pi(x) mode and local verificat
     try { fn(); check(false, label + " did not throw"); }
     catch (e) { check(e instanceof RangeError, label + " throws RangeError"); }
   }
+  NP.prepareWalk(700000);   // counting path (n > 500000) reuses the prepared base primes
+  var expect = NP.primesUpTo(NP.upperBoundForNthPrime(700000))[599999];
+  eq(NP.nthPrime(600000).value, expect, "walk uses the prepared base-prime cache");
   throwsRange(function () { NP.countPrimes(9e15 + 2); }, "countPrimes beyond 9e15");
   throwsRange(function () { NP.countPrimes(1.5); }, "countPrimes non-integer");
 })();

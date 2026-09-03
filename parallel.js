@@ -225,7 +225,7 @@
     var n = 1;
     if (IS_NODE) { try { n = require("os").cpus().length; } catch (e) { n = 2; } }
     else if (typeof navigator !== "undefined" && navigator.hardwareConcurrency) n = navigator.hardwareConcurrency;
-    return Math.max(1, Math.min(16, n | 0));
+    return Math.max(1, Math.min(32, n | 0));
   }
 
   function spawn() {

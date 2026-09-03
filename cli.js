@@ -116,6 +116,7 @@ if (piMode) {
   var run = parallelOK
     ? NP.nthPrimeAsync(n, {
         engineLabel: "multi-core ×" + K + " threads",
+        parallelMinX: Math.max(2e11, 1e12 * 4 / K),
         countAsync: function (x0, cb) { return PAR.primeCountParallel(x0, { threads: K, onProgress: cb }); }
       })
     : Promise.resolve(NP.nthPrime(n));

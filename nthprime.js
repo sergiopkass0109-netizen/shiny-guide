@@ -860,6 +860,21 @@
     });
   }
 
+  // Base primes for the walk cover √(any point it can visit): the n-th prime
+  // is ≤ upperBoundForNthPrime(n) by Rosser's theorem.  Cached (a superset
+  // is fine) so prepareWalk() can sieve them while the count runs elsewhere.
+  var walkCache = null;
+  function walkBasePrimes(n) {
+    var limit = isqrt(upperBoundForNthPrime(n)) + 1;
+    if (walkCache && walkCache.limit >= limit) return walkCache.primes;
+    var primes = primesUpTo(limit);
+    walkCache = { limit: limit, primes: primes };
+    return primes;
+  }
+  function prepareWalk(n) {
+    walkBasePrimes(checkN(n));
+  }
+
   // Finish an n-th prime query from an exact count c0 = π(x0): sieve-walk to
   // the answer and attach the local verification.  Public so an external
   // counter (the multi-core engine) can supply c0.
@@ -868,9 +883,7 @@
     n = checkN(n);
     var onProgress = opts.onProgress;
     var tWalk = nowMs();
-    // Base primes cover √(any point the walk can visit): the n-th prime is
-    // ≤ upperBoundForNthPrime(n) by Rosser's theorem.
-    var basePrimes = primesUpTo(isqrt(upperBoundForNthPrime(n)) + 1);
+    var basePrimes = walkBasePrimes(n);
     var value = -1;
     var walked = 0;
     var seg, i;
@@ -983,7 +996,9 @@
     if (x0 < minX) return Promise.resolve(nthPrime(n0, opts));
     var tCount = nowMs();
     var prog = opts.onProgress;
-    return opts.countAsync(x0, prog ? function (f) { prog("count", f); } : null).then(function (c0) {
+    var counting = opts.countAsync(x0, prog ? function (f) { prog("count", f); } : null);
+    try { prepareWalk(n0); } catch (e) { /* the walk will sieve them itself */ }
+    return counting.then(function (c0) {
       return nthPrimeFromCount(n0, x0, c0, {
         engine: opts.engineLabel || "external counter",
         msEstimate: round1(tCount - tEst),
@@ -1012,6 +1027,7 @@
     nthPrime: nthPrime,
     nthPrimeAsync: nthPrimeAsync,
     nthPrimeFromCount: nthPrimeFromCount,
+    prepareWalk: prepareWalk,
     guessNthPrime: guessNthPrime,
     isPrime: isPrime,
     countPrimes: countPrimes,
