@@ -39,19 +39,29 @@
       <button class="chip" data-n="1e10">10^10</button>
       <button class="chip" data-n="1e12">10^12</button>
       <button class="chip" data-n="1e13">10^13</button>
+      <button class="chip" data-n="pi(1e12)">π(10^12)</button>
     </div>
-    <p class="hint">any whole number from 1 to 2×10<sup>14</sup> — commas, <code>1e9</code> and <code>10^k</code> all work.
-    Or ask if a specific number is prime: end it with <code>?</code> (e.g. <code>4999999999999999999999?</code>) —
-    deterministic up to 3.3×10<sup>24</sup>, answered in polynomial time</p>
+    <p class="hint"><code>n</code> gives the n-th prime for any 1 ≤ n ≤ 2×10<sup>14</sup> — commas, <code>1e9</code> and <code>10^k</code> all work.
+    <code>pi(x)</code> counts the primes up to x (to 9×10<sup>15</sup>).
+    <code>N?</code> tests whether N is prime — deterministic to 3.3×10<sup>24</sup>, in polynomial time.
+    Every result gets a shareable link.</p>
   </section>
 
   <section class="card answer-card">
     <div class="answer-label" id="answer-label">the answer appears here</div>
     <div class="answer-row">
-      <output id="answer" for="n-input">&nbsp;</output>
-      <button id="copy" type="button" title="copy the plain digits" hidden>copy</button>
+      <output id="answer" for="n-input" aria-live="polite">&nbsp;</output>
+      <span class="actions">
+        <button id="copy" type="button" title="copy the plain digits" hidden>copy</button>
+        <button id="share" type="button" title="copy a link that reproduces this result" hidden>share link</button>
+      </span>
     </div>
-    <div class="progress" id="progress" hidden><div class="progress-bar" id="progress-bar"></div></div>
+    <div class="progress-row" id="progress-row" hidden>
+      <div class="progress" id="progress"><div class="progress-bar" id="progress-bar"></div></div>
+      <span class="elapsed" id="elapsed"></span>
+      <button id="cancel" type="button" title="stop this computation">cancel</button>
+    </div>
+    <div class="verify" id="verify" hidden></div>
     <div class="error" id="error" hidden></div>
     <dl class="stats" id="stats" hidden>
       <div><dt>method</dt><dd id="s-method"></dd></div>
@@ -93,11 +103,13 @@
   "use strict";
 
   var $ = function (id) { return document.getElementById(id); };
-  var input = $("n-input"), go = $("go"), answer = $("answer"), copyBtn = $("copy");
-  var answerLabel = $("answer-label"), errBox = $("error"), stats = $("stats");
-  var progress = $("progress"), progressBar = $("progress-bar");
-  var running = false, jobId = 0, worker = null, plainDigits = "";
-  var pendingN = null;
+  var input = $("n-input"), go = $("go"), answer = $("answer");
+  var copyBtn = $("copy"), shareBtn = $("share"), cancelBtn = $("cancel");
+  var answerLabel = $("answer-label"), errBox = $("error"), stats = $("stats"), verifyEl = $("verify");
+  var progressRow = $("progress-row"), progressBar = $("progress-bar"), elapsedEl = $("elapsed");
+  var running = false, jobId = 0, worker = null, plainDigits = "", shareHash = "";
+  var pending = null;          // { op, arg } of the in-flight job (for the sync fallback)
+  var timerId = null, tStart = 0;
 
   // Accept "1234567", "1,234,567", "1_000_000", "1e9", "10^12".
   function parseN(raw) {
@@ -112,30 +124,72 @@
     return v;
   }
 
+  // "pi(x)", "pi x", "π(x)" or "#x"  →  the argument text, else null
+  function parsePiArg(raw) {
+    var s = String(raw).trim();
+    var m = /^(?:pi|π)\s*\(?\s*([^()]+?)\s*\)?$/i.exec(s) || /^#\s*(.+)$/.exec(s);
+    return m ? m[1] : null;
+  }
+
   function fmt(x) { return Number(x).toLocaleString("en-US"); }
+  function groupDigits(s) { return s.replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+  function now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+  function fmtElapsed(ms) { return ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(1) + " s"; }
 
   function setBusy(b) {
     running = b;
     go.disabled = b;
     go.textContent = b ? "working…" : "Find p(n)";
-    progress.hidden = !b;
-    if (b) progressBar.style.width = "2%";
+    progressRow.hidden = !b;
+    if (b) {
+      progressBar.style.width = "2%";
+      tStart = now();
+      elapsedEl.textContent = "0 ms";
+      if (timerId) clearInterval(timerId);
+      timerId = setInterval(function () { elapsedEl.textContent = fmtElapsed(now() - tStart); }, 100);
+    } else if (timerId) {
+      clearInterval(timerId);
+      timerId = null;
+    }
+  }
+
+  function clearOutput() {
+    errBox.hidden = true;
+    stats.hidden = true;
+    verifyEl.hidden = true;
+    copyBtn.hidden = true;
+    shareBtn.hidden = true;
+    answer.textContent = " ";
   }
 
   function showError(msg) {
+    clearOutput();
     errBox.textContent = msg;
     errBox.hidden = false;
-    answer.textContent = " ";
     answerLabel.textContent = "the answer appears here";
-    copyBtn.hidden = true;
-    stats.hidden = true;
+  }
+
+  // every result gets a link that reproduces it: #n=…, #pi=…, #is=…
+  function setShare(hash) {
+    shareHash = hash;
+    if (window.history && history.replaceState) {
+      try { history.replaceState(null, "", "#" + hash); } catch (e) { /* file:// quirks */ }
+    }
+    shareBtn.hidden = false;
+  }
+
+  function ordinal(n) {
+    var t = n % 100;
+    if (t >= 11 && t <= 13) return fmt(n) + "th";
+    var d = n % 10;
+    return fmt(n) + (d === 1 ? "st" : d === 2 ? "nd" : d === 3 ? "rd" : "th");
   }
 
   function showResult(n, res) {
-    errBox.hidden = true;
+    clearOutput();
     plainDigits = String(res.value);
     answer.textContent = fmt(res.value);
-    answerLabel.innerHTML = "p(" + fmt(n) + ") — the " + ordinal(n) + " prime";
+    answerLabel.textContent = "p(" + fmt(n) + ") — the " + ordinal(n) + " prime (" + plainDigits.length + " digits)";
     copyBtn.hidden = false;
     $("s-method").textContent = res.method;
     if (res.guess !== undefined) {
@@ -147,19 +201,35 @@
     } else {
       $("s-guess").textContent = $("s-pi").textContent = $("s-off").textContent = $("s-walk").textContent = "—";
     }
-    $("s-time").textContent = (res.ms >= 1000 ? (res.ms / 1000).toFixed(2) + " s" : res.ms + " ms") +
+    $("s-time").textContent = fmtElapsed(res.ms) +
       (res.msCount !== undefined ? " (count " + Math.round(res.msCount) + " ms, walk " + Math.round(res.msWalk) + " ms)" : "");
     stats.hidden = false;
+    if (res.prev !== undefined && res.next !== undefined) {
+      verifyEl.innerHTML = "<b>✓ verified on the spot:</b> " + fmt(res.value) +
+        " is prime (deterministic Miller–Rabin)" +
+        (res.prev !== null ? " · previous prime " + fmt(res.prev) +
+          " <span class=\"muted\">(gap " + fmt(res.value - res.prev) + ")</span>" : "") +
+        " · next prime " + fmt(res.next) +
+        " <span class=\"muted\">(gap " + fmt(res.next - res.value) + ")</span>";
+      verifyEl.hidden = false;
+    }
+    setShare("n=" + String(n));
   }
 
-  function ordinal(n) {
-    var t = n % 100;
-    if (t >= 11 && t <= 13) return fmt(n) + "th";
-    var d = n % 10;
-    return fmt(n) + (d === 1 ? "st" : d === 2 ? "nd" : d === 3 ? "rd" : "th");
+  function showPiResult(x, res) {
+    clearOutput();
+    plainDigits = String(res.value);
+    answer.textContent = fmt(res.value);
+    answerLabel.textContent = "π(" + fmt(x) + ") — the number of primes ≤ " + fmt(x);
+    copyBtn.hidden = false;
+    $("s-method").textContent = "exact prime count, Lucy_Hedgehog [" + res.engine + "]";
+    $("s-guess").textContent = $("s-pi").textContent = $("s-off").textContent = $("s-walk").textContent = "—";
+    $("s-time").textContent = fmtElapsed(res.ms);
+    stats.hidden = false;
+    setShare("pi=" + String(x));
   }
 
-  // Background thread built from the inline engine source, so this page
+  // Background thread built from the inline engine sources, so this page
   // needs no external files. Falls back to the main thread automatically.
   function getWorker() {
     if (worker !== null) return worker;
@@ -167,34 +237,35 @@
       var src = document.getElementById("engine-wasm-src").textContent + "\n" +
         document.getElementById("engine-src").textContent +
         "\nself.onmessage = function (e) {" +
-        "  var id = e.data.id, n = e.data.n;" +
+        "  var id = e.data.id, op = e.data.op, arg = e.data.arg;" +
         "  try {" +
-        "    var result = self.NthPrime.nthPrime(n, { onProgress: function (ph, f) {" +
-        "      self.postMessage({ id: id, progress: { phase: ph, frac: f } });" +
-        "    } });" +
-        "    self.postMessage({ id: id, n: n, ok: true, result: result });" +
+        "    var prog = function (ph, f) { self.postMessage({ id: id, progress: { phase: ph, frac: f } }); };" +
+        "    var result = op === 'pi' ? self.NthPrime.countPrimes(arg, { onProgress: prog })" +
+        "                            : self.NthPrime.nthPrime(arg, { onProgress: prog });" +
+        "    self.postMessage({ id: id, op: op, arg: arg, ok: true, result: result });" +
         "  } catch (err) {" +
-        "    self.postMessage({ id: id, n: n, ok: false, error: String((err && err.message) || err) });" +
+        "    self.postMessage({ id: id, op: op, arg: arg, ok: false, error: String((err && err.message) || err) });" +
         "  }" +
         "};";
       var url = URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
       worker = new Worker(url);
       worker.onmessage = function (e) {
         var msg = e.data;
-        if (msg.id !== jobId) return; // stale job
+        if (msg.id !== jobId) return; // stale or cancelled job
         if (msg.progress) {
           progressBar.style.width = Math.max(2, Math.round(msg.progress.frac * 100)) + "%";
           return;
         }
         setBusy(false);
-        if (msg.ok) showResult(msg.n, msg.result);
-        else showError(msg.error);
+        if (!msg.ok) showError(msg.error);
+        else if (msg.op === "pi") showPiResult(msg.arg, msg.result);
+        else showResult(msg.arg, msg.result);
       };
       worker.onerror = function () {
         // Worker unusable (some browsers restrict it for local files):
         // finish the in-flight job on the main thread instead.
         worker = false;
-        if (running && pendingN !== null) computeSync(pendingN);
+        if (running && pending) computeSync(pending.op, pending.arg);
       };
     } catch (e) {
       worker = false;
@@ -202,24 +273,20 @@
     return worker;
   }
 
-  function computeSync(n) {
+  function computeSync(op, arg) {
     var id = jobId;
     setTimeout(function () { // let the UI paint "working…" first
       try {
-        var res = NthPrime.nthPrime(n);
+        var res = op === "pi" ? NthPrime.countPrimes(arg) : NthPrime.nthPrime(arg);
         if (id !== jobId) return;
         setBusy(false);
-        showResult(n, res);
+        if (op === "pi") showPiResult(arg, res); else showResult(arg, res);
       } catch (err) {
         if (id !== jobId) return;
         setBusy(false);
         showError(String((err && err.message) || err));
       }
     }, 30);
-  }
-
-  function groupDigits(s) {
-    return s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   }
 
   function checkPrimality(raw) {
@@ -229,51 +296,88 @@
       return;
     }
     try {
-      var t0 = performance.now ? performance.now() : Date.now();
+      var t0 = now();
       var res = NthPrime.isPrime(digits);
-      var ms = (performance.now ? performance.now() : Date.now()) - t0;
-      errBox.hidden = true;
-      stats.hidden = true;
-      copyBtn.hidden = true;
+      var ms = now() - t0;
+      clearOutput();
       answer.textContent = res.prime ? "PRIME ✓" : "not prime";
       answerLabel.textContent = groupDigits(digits) + " — " +
         (res.prime ? "certified prime" :
          res.factor ? "composite (divisible by " + res.factor + ")" : "composite") +
         " · deterministic Miller–Rabin, polynomial time O(d³) in the d digits · " +
         (ms < 1 ? "<1" : Math.round(ms)) + " ms";
+      setShare("is=" + digits);
     } catch (err) {
       showError(String((err && err.message) || err));
     }
   }
 
+  // friendly expectation for big jobs (nEq ≈ an n-th-prime-sized workload)
+  function sizeNote(nEq) {
+    if (nEq >= 2e13) return " (heads-up: a few minutes and ~1 GB of memory — desktop browser or the Node CLI recommended; cancel any time)";
+    if (nEq >= 2e12) return " (this size takes a minute or two)";
+    return "";
+  }
+
+  function startJob(op, arg, label) {
+    jobId++;
+    pending = { op: op, arg: arg };
+    clearOutput();
+    setBusy(true);
+    answerLabel.textContent = label;
+    var w = getWorker();
+    if (w) w.postMessage({ id: jobId, op: op, arg: arg });
+    else computeSync(op, arg);
+  }
+
   function compute() {
     if (running) return;
-    if (/\?\s*$/.test(input.value)) {
-      checkPrimality(input.value.replace(/\?\s*$/, ""));
+    var raw = input.value;
+    if (/\?\s*$/.test(raw)) { checkPrimality(raw.replace(/\?\s*$/, "")); return; }
+
+    var piArg = parsePiArg(raw);
+    if (piArg !== null) {
+      var x = parseN(piArg);
+      if (x === null) { showError("For a prime count, write pi(x) with a whole number x, like pi(1e12)."); return; }
+      if (x > NthPrime.MAX_PI_X) { showError("x must be at most 9×10^15 for an exact count (below 2^53)."); return; }
+      startJob("pi", x, "counting the primes up to " + fmt(x) + "…" + sizeNote(x / 33));
       return;
     }
-    var n = parseN(input.value);
-    if (n === null) { showError("Please enter a whole number, like 1000000, 1e9 or 10^12."); return; }
+
+    var n = parseN(raw);
+    if (n === null) {
+      showError("Please enter a whole number (like 1000000, 1e9 or 10^12), a number with ? to test primality, or pi(x) to count primes.");
+      return;
+    }
     if (n < 1) { showError("n must be at least 1 — the 1st prime is 2."); return; }
-    if (n > NthPrime.MAX_N) { showError("n must be at most 2\u00d710^14 so the answer stays exact (below 2^53)."); return; }
+    if (n > NthPrime.MAX_N) { showError("n must be at most 2×10^14 so the answer stays exact (below 2^53)."); return; }
+    startJob("nth", n, "computing p(" + fmt(n) + ")…" + sizeNote(n));
+  }
 
-    jobId++;
-    pendingN = n;
-    setBusy(true);
-    answerLabel.textContent = "computing p(" + fmt(n) + ")…" +
-      (n >= 2e13 ? " (heads-up: needs a few minutes and ~1 GB of memory — desktop browser or Node CLI recommended)" :
-       n >= 2e12 ? " (this size takes a minute or two)" : "");
-    answer.textContent = " ";
-    copyBtn.hidden = true;
-    errBox.hidden = true;
-    stats.hidden = true;
+  function cancelJob() {
+    if (!running) return;
+    jobId++;                                              // late messages from this job are ignored
+    if (worker) { worker.terminate(); worker = null; }    // a fresh worker is built next time
+    setBusy(false);
+    clearOutput();
+    answerLabel.textContent = "cancelled";
+  }
 
-    var w = getWorker();
-    if (w) w.postMessage({ id: jobId, n: n });
-    else computeSync(n);
+  // shareable links: #n=…, #pi=…, #is=…  (very large jobs are pre-filled, not auto-started)
+  function applyHash() {
+    var h = decodeURIComponent((location.hash || "").replace(/^#/, ""));
+    var m = /^(n|pi|is)=(.+)$/.exec(h);
+    if (!m) return;
+    var kind = m[1], val = m[2];
+    input.value = kind === "pi" ? "pi(" + val + ")" : kind === "is" ? val + "?" : val;
+    var v = parseN(val);
+    var big = kind === "n" ? (v !== null && v >= 2e13) : kind === "pi" ? (v !== null && v >= 7e14) : false;
+    if (big) { answerLabel.textContent = "press Find p(n) to run this large computation (it takes minutes)"; return; }
+    compute();
   }
 
   go.addEventListener("click", compute);
+  cancelBtn.addEventListener("click", cancelJob);
   input.addEventListener("keydown", function (e) { if (e.key === "Enter") compute(); });
   Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (chip) {
     chip.addEventListener("click", function () {
@@ -293,6 +397,21 @@
     }
     setTimeout(function () { copyBtn.textContent = "copy"; }, 1500);
   });
+  shareBtn.addEventListener("click", function () {
+    var url = location.href.split("#")[0] + "#" + shareHash;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).then(function () {
+        shareBtn.textContent = "link copied!";
+      }).catch(function () {
+        shareBtn.textContent = url;
+      });
+    } else {
+      shareBtn.textContent = url;
+    }
+    setTimeout(function () { shareBtn.textContent = "share link"; }, 1500);
+  });
+  window.addEventListener("hashchange", applyHash);
+  applyHash();
 })();
 </script>
 </body>

@@ -1,6 +1,6 @@
 {
   "name": "nth-prime",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Exact n-th prime up to n = 2e14 (the float64 frontier): Riemann R inverse estimate + Lucy_Hedgehog exact counting + segmented sieve walk, cross-verified by an independent Lagarias-Miller-Odlyzko engine. Zero dependencies; browser UI, Node CLI and library.",
   "main": "nthprime.js",
   "bin": { "nth-prime": "./cli.js" },

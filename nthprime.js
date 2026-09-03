@@ -765,6 +765,66 @@
   }
 
   // ------------------------------------------------------------------
+  // neighbouring primes — lets every answer carry an on-the-spot local
+  // verification (p is prime; prev/next primes and gaps), a few dozen
+  // deterministic Miller–Rabin tests: microseconds.
+  // ------------------------------------------------------------------
+
+  function toNumberIfSafe(b) {
+    return b <= BigInt("9007199254740991") ? Number(b) : b.toString();
+  }
+
+  function primeNeighbors(p) {
+    if (!initBigints()) throw new Error("BigInt unavailable in this environment");
+    var P = typeof p === "bigint" ? p : BigInt(String(p));
+    if (P < BI2) throw new RangeError("primeNeighbors: p must be ≥ 2");
+    var q = P - BI1, prev = null;
+    while (q >= BI2) {
+      if (isPrime(q).prime) { prev = q; break; }
+      q -= BI1;
+    }
+    var r = P + BI1;
+    while (!isPrime(r).prime) r += BI1;
+    return { prev: prev === null ? null : toNumberIfSafe(prev), next: toNumberIfSafe(r) };
+  }
+
+  function withNeighbors(res) {
+    try {
+      var nb = primeNeighbors(res.value);
+      res.prev = nb.prev;
+      res.next = nb.next;
+    } catch (e) { /* neighbours are a courtesy; never fail the answer over them */ }
+    return res;
+  }
+
+  // ------------------------------------------------------------------
+  // π(x) as a first-class query (the page's pi(x) mode and the CLI)
+  // ------------------------------------------------------------------
+
+  var MAX_PI_X = 9e15; // exact-integer safety: below 2^53
+
+  function countPrimes(x, opts) {
+    x = typeof x === "string" ? Number(x) : x;
+    if (typeof x !== "number" || !Number.isFinite(x) || !Number.isInteger(x)) {
+      throw new RangeError("x must be an integer");
+    }
+    if (x < 0) throw new RangeError("x must be ≥ 0");
+    if (x > MAX_PI_X) throw new RangeError("x must be ≤ 9×10^15 (answers stay below 2^53)");
+    var onProgress = opts && opts.onProgress;
+    var cb = onProgress ? function (f) { onProgress("count", f); } : null;
+    var t0 = nowMs();
+    var value = null;
+    var engine = "Lucy_Hedgehog/JS";
+    if (x >= 1e7 && getWasmModule()) {
+      value = primeCountWasm(x, cb);
+      if (value !== null) engine = "compiled C/WebAssembly";
+    }
+    if (value === null) value = primeCount(x, cb);
+    if (onProgress) onProgress("done", 1);
+    return { x: x, value: value, engine: engine, ms: round1(nowMs() - t0) };
+  }
+
+  // ------------------------------------------------------------------
   // n-th prime via count + walk
   // ------------------------------------------------------------------
 
@@ -894,18 +954,21 @@
     var t0 = nowMs();
 
     if (n <= FIRST_PRIMES.length) {
-      return { n: n, value: FIRST_PRIMES[n - 1], method: "lookup table", ms: round1(nowMs() - t0) };
+      return withNeighbors({ n: n, value: FIRST_PRIMES[n - 1], method: "lookup table", ms: round1(nowMs() - t0) });
     }
     if (n <= SIEVE_PATH_MAX) {
       var v = nthPrimeBySieve(n);
-      return { n: n, value: v, method: "sieve of Eratosthenes (direct)", ms: round1(nowMs() - t0) };
+      return withNeighbors({ n: n, value: v, method: "sieve of Eratosthenes (direct)", ms: round1(nowMs() - t0) });
     }
-    return nthPrimeByCounting(n, onProgress);
+    return withNeighbors(nthPrimeByCounting(n, onProgress));
   }
 
   return {
     nthPrime: nthPrime,
     isPrime: isPrime,
+    countPrimes: countPrimes,
+    primeNeighbors: primeNeighbors,
+    MAX_PI_X: MAX_PI_X,
     primeCount: primeCount,
     primeCountLMO: primeCountLMO,
     primeCountWasm: primeCountWasm,

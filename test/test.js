@@ -330,6 +330,43 @@ section("deterministic polynomial-time primality test (isPrime)");
 })();
 
 // ---------------------------------------------------------------- 11
+section("countPrimes + primeNeighbors (the page's pi(x) mode and local verification)");
+(function () {
+  var list = NP.primesUpTo(2000000);
+  var xs = [0, 1, 2, 3, 10, 97, 1e6, 12345678, 1e9];
+  for (var i = 0; i < xs.length; i++) {
+    var r = NP.countPrimes(xs[i]);
+    eq(r.value, NP.primeCount(xs[i]), "countPrimes(" + xs[i] + ")");
+    check(typeof r.engine === "string" && r.ms >= 0, "countPrimes metadata for " + xs[i]);
+  }
+  // neighbours match an independently generated prime list exactly
+  var idx = [0, 1, 2, 3, 100, 1000, 78497, 100000];
+  for (i = 0; i < idx.length; i++) {
+    var k = idx[i];
+    var nb = NP.primeNeighbors(list[k]);
+    eq(nb.prev, k === 0 ? null : list[k - 1], "prev of " + list[k]);
+    eq(nb.next, list[k + 1], "next of " + list[k]);
+  }
+  // every nthPrime code path (table, sieve, counting) carries neighbours
+  var ns = [1, 2, 12, 13, 1000, 140000];
+  for (i = 0; i < ns.length; i++) {
+    var res = NP.nthPrime(ns[i]);
+    eq(res.prev, ns[i] === 1 ? null : list[ns[i] - 2], "nthPrime(" + ns[i] + ").prev");
+    eq(res.next, list[ns[i]], "nthPrime(" + ns[i] + ").next");
+  }
+  var big = NP.nthPrime(600000); // counting path
+  check(big.prev < big.value && big.value < big.next &&
+        NP.isPrime(big.prev).prime && NP.isPrime(big.next).prime &&
+        big.next - big.prev < 1000, "nthPrime(600000) neighbours are prime and near");
+  function throwsRange(fn, label) {
+    try { fn(); check(false, label + " did not throw"); }
+    catch (e) { check(e instanceof RangeError, label + " throws RangeError"); }
+  }
+  throwsRange(function () { NP.countPrimes(9e15 + 2); }, "countPrimes beyond 9e15");
+  throwsRange(function () { NP.countPrimes(1.5); }, "countPrimes non-integer");
+})();
+
+// ---------------------------------------------------------------- 12
 section("index.html is self-contained and in sync (run `npm run build` if not)");
 (function () {
   var fs = require("fs");

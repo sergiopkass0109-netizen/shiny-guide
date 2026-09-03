@@ -178,3 +178,48 @@ footer a:hover { text-decoration: underline; }
   .ask-row { flex-direction: column; }
   #go { width: 100%; }
 }
+
+.actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+#share {
+  background: transparent;
+  border: 1px solid var(--panel-edge);
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+#share:hover { color: var(--accent); border-color: var(--accent); }
+
+.progress-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.progress-row .progress { flex: 1; margin-top: 0; }
+
+.elapsed {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 5.5em;
+  text-align: right;
+}
+
+#cancel {
+  background: transparent;
+  border: 1px solid var(--panel-edge);
+  color: var(--error);
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 4px 10px;
+}
+#cancel:hover { border-color: var(--error); }
+
+.verify {
+  margin-top: 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  word-break: break-word;
+}
+.verify b { color: var(--accent-2); font-weight: 600; }
+.verify .muted { color: var(--muted); }

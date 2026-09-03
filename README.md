@@ -1,5 +1,7 @@
 # The *n*-th Prime
 
+[![CI](https://github.com/sergiopkass0109-netizen/shiny-guide/actions/workflows/ci.yml/badge.svg)](https://github.com/sergiopkass0109-netizen/shiny-guide/actions/workflows/ci.yml)
+
 Type a number **n** into the box, get back the **n-th prime number** — exactly,
 for any **1 ≤ n ≤ 2×10¹⁴**, in a self-contained web page with zero dependencies —
 counting on a **compiled C/WebAssembly core** at near-native speed, verified by
@@ -14,7 +16,7 @@ p(10¹⁴)   =  3,475,385,758,524,527       ~5 min     (matches OEIS A006988)
 p(2×10¹⁴) =  7,093,600,525,704,677       ~9 min     (the float64 frontier)
 ```
 
-*(Node 22, single thread, pure JavaScript — run `npm run bench` yourself.
+*(Node 22, single thread, JavaScript with the WebAssembly core — run `npm run bench` yourself.
 In-browser times are similar on a desktop machine.)*
 
 ## Why 2×10¹⁴ is a hard wall — and why we drive right up to it
@@ -137,7 +139,7 @@ Milliseconds.
 
 ## How it is verified
 
-`npm test` (~10 s) runs 10 independent layers, 172 checks (179 in --slow):
+`npm test` (~10 s) runs 12 independent layers, 239 checks (more in --slow / --huge):
 
 1. `primesUpTo` vs brute-force trial division;
 2. table/sieve paths vs an independently generated prime list;
@@ -150,7 +152,11 @@ Milliseconds.
 8. input-validation edge cases;
 9. **triple-engine agreement** (compiled wasm vs JS Lucy vs LMO) on
    structured + random x and several α values — the flagship check;
-10. the self-contained `index.html` embeds the current engine byte-for-byte.
+10. the deterministic polynomial-time primality test vs trial division,
+    Carmichael numbers, Mersenne primes and the project's own verified primes;
+11. `countPrimes` (the page's π(x) mode) and the neighbouring-prime
+    verification attached to every answer, vs an independent prime list;
+12. the self-contained `index.html` embeds the current engine byte-for-byte.
 
 Top-end results verified this way: π(10¹³) = 346,065,536,839 and
 π(10¹⁴) = 3,204,941,750,802 (both engines, both correct), and
@@ -166,7 +172,16 @@ saving just it works):
 python3 -m http.server 8000     # then http://localhost:8000
 ```
 
-Type `1234567`, `1,234,567`, `1e9` or `10^12` and press **Find p(n)**.
+Three things the box understands:
+
+| you type | you get |
+|---|---|
+| `1e12` (or `1,000,000,000,000`, `10^12`) | the n-th prime — with its neighbouring primes verified on the spot |
+| `pi(1e12)` | π(x), the exact number of primes ≤ x, up to 9×10¹⁵ |
+| `2305843009213693951?` | a deterministic primality verdict, up to 3.3×10²⁴ |
+
+Every result gets a **share link** (e.g. `…/#n=1000000000000`) that reproduces
+it on open, an elapsed-time readout, and a **cancel** button for the long ones.
 Sizes ≥ 10¹² show a progress bar; n ≥ 2×10¹³ needs ~1 GB of memory — fine in
 desktop Chrome/Firefox or the Node CLI, not for phones.
 
@@ -210,6 +225,7 @@ npm run bench       # timing table; --big / --huge tiers
 | `cli.js` | nth-prime and π(x) command line |
 | `test/test.js` | the verification suite |
 | `bench.js` | timing table |
+| `.github/workflows/ci.yml` | runs the whole verification suite on every push (Node 20 + 22) |
 
 ## Research sources
 
