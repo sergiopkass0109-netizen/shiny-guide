@@ -10,6 +10,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The n-th Prime</title>
+<meta name="description" content="Exact n-th prime, prime counting and primality proofs — verified by three independent engines, multi-core, installable, works offline.">
+<meta name="theme-color" content="#0b0e14">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
 /*BUILD:STYLE*/
 </style>
@@ -23,6 +27,7 @@
       Riemann&nbsp;R inverse estimate&nbsp;·&nbsp;Lucy_Hedgehog exact count
       <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;compiled C/WebAssembly core&nbsp;·&nbsp;triple-engine verified
     </p>
+    <p class="status-line"><span id="mc-status"></span><button id="install" class="chip" hidden>install as app</button></p>
   </header>
 
   <section class="card" id="ask-card">
@@ -98,6 +103,9 @@
 <script id="engine-src">
 /*BUILD:ENGINE*/
 </script>
+<script id="engine-parallel-src">
+/*BUILD:PARALLEL*/
+</script>
 <script>
 (function () {
   "use strict";
@@ -108,6 +116,7 @@
   var answerLabel = $("answer-label"), errBox = $("error"), stats = $("stats"), verifyEl = $("verify");
   var progressRow = $("progress-row"), progressBar = $("progress-bar"), elapsedEl = $("elapsed");
   var running = false, jobId = 0, worker = null, plainDigits = "", shareHash = "";
+  var parJob = null;           // in-flight multi-core count (has .cancel())
   var pending = null;          // { op, arg } of the in-flight job (for the sync fallback)
   var timerId = null, tStart = 0;
 
@@ -241,7 +250,9 @@
         "  try {" +
         "    var prog = function (ph, f) { self.postMessage({ id: id, progress: { phase: ph, frac: f } }); };" +
         "    var result = op === 'pi' ? self.NthPrime.countPrimes(arg, { onProgress: prog })" +
-        "                            : self.NthPrime.nthPrime(arg, { onProgress: prog });" +
+        "      : op === 'nthFromCount' ? self.NthPrime.nthPrimeFromCount(arg, e.data.x0, e.data.c0," +
+        "                                  { engine: e.data.engine, msCount: e.data.msCount, onProgress: prog })" +
+        "      : self.NthPrime.nthPrime(arg, { onProgress: prog });" +
         "    self.postMessage({ id: id, op: op, arg: arg, ok: true, result: result });" +
         "  } catch (err) {" +
         "    self.postMessage({ id: id, op: op, arg: arg, ok: false, error: String((err && err.message) || err) });" +
@@ -289,6 +300,58 @@
     }, 30);
   }
 
+  // ---- multi-core path: count on every core from the main thread, then
+  // finish (base primes + walk + verification) in the compute worker.
+  function parallelReady() {
+    return typeof NthPrimeParallel !== "undefined" && NthPrimeParallel.available() && NthPrimeParallel.threads() >= 2;
+  }
+
+  function runParallel(id, op, arg, x0) {
+    var K = NthPrimeParallel.threads();
+    var label = "multi-core ×" + K + " threads";
+    var t0 = now();
+    var job = NthPrimeParallel.primeCountParallel(x0, {
+      onProgress: function (f) { if (id === jobId) progressBar.style.width = Math.max(2, Math.round(f * 100)) + "%"; }
+    });
+    parJob = job;
+    job.then(function (c0) {
+      if (id !== jobId) return;
+      parJob = null;
+      var msCount = now() - t0;
+      if (op === "pi") {
+        setBusy(false);
+        showPiResult(arg, { x: arg, value: c0, engine: label, ms: msCount });
+        return;
+      }
+      var msg = { id: id, op: "nthFromCount", arg: arg, x0: x0, c0: c0, msCount: msCount, engine: label };
+      var w = getWorker();
+      if (w) w.postMessage(msg);
+      else computeSyncFromCount(msg);
+    }).catch(function () {
+      if (id !== jobId) return;               // cancelled — nothing to do
+      parJob = null;
+      var w = getWorker();                    // e.g. out of memory: single-thread path takes over
+      if (w) w.postMessage({ id: id, op: op, arg: arg });
+      else computeSync(op, arg);
+    });
+  }
+
+  function computeSyncFromCount(msg) {
+    var id = jobId;
+    setTimeout(function () {
+      try {
+        var res = NthPrime.nthPrimeFromCount(msg.arg, msg.x0, msg.c0, { engine: msg.engine, msCount: msg.msCount });
+        if (id !== jobId) return;
+        setBusy(false);
+        showResult(msg.arg, res);
+      } catch (err) {
+        if (id !== jobId) return;
+        setBusy(false);
+        showError(String((err && err.message) || err));
+      }
+    }, 30);
+  }
+
   function checkPrimality(raw) {
     var digits = raw.replace(/[,_\s]/g, "");
     if (!/^\d{1,25}$/.test(digits)) {
@@ -321,12 +384,17 @@
 
   function startJob(op, arg, label) {
     jobId++;
+    var id = jobId;
     pending = { op: op, arg: arg };
     clearOutput();
     setBusy(true);
     answerLabel.textContent = label;
+    if (parallelReady()) {
+      var x0 = op === "pi" ? arg : NthPrime.guessNthPrime(arg);
+      if (x0 >= 1e12) { runParallel(id, op, arg, x0); return; }  // below this, one core is as fast
+    }
     var w = getWorker();
-    if (w) w.postMessage({ id: jobId, op: op, arg: arg });
+    if (w) w.postMessage({ id: id, op: op, arg: arg });
     else computeSync(op, arg);
   }
 
@@ -357,6 +425,7 @@
   function cancelJob() {
     if (!running) return;
     jobId++;                                              // late messages from this job are ignored
+    if (parJob) { parJob.cancel(); parJob = null; }       // stops every core immediately
     if (worker) { worker.terminate(); worker = null; }    // a fresh worker is built next time
     setBusy(false);
     clearOutput();
@@ -410,6 +479,44 @@
     }
     setTimeout(function () { shareBtn.textContent = "share link"; }, 1500);
   });
+  // ---- multi-core status, install-as-app, and the service worker that
+  // makes both possible on a static host
+  (function () {
+    var st = $("mc-status");
+    var httpish = /^https?:/.test(location.protocol);
+    if (parallelReady()) {
+      st.textContent = "multi-core ready · " + NthPrimeParallel.threads() + " threads";
+    } else if (httpish && "serviceWorker" in navigator) {
+      st.textContent = "multi-core activates after the app's first load";
+    } else {
+      st.textContent = "single-thread mode · the hosted app runs multi-core";
+    }
+    var deferredInstall = null, installBtn = $("install");
+    window.addEventListener("beforeinstallprompt", function (e) {
+      e.preventDefault();
+      deferredInstall = e;
+      installBtn.hidden = false;
+    });
+    installBtn.addEventListener("click", function () {
+      if (!deferredInstall) return;
+      deferredInstall.prompt();
+      deferredInstall = null;
+      installBtn.hidden = true;
+    });
+    if (httpish && "serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.js").then(function () {
+        // First visit: the worker isn't controlling this page yet. Reload once so
+        // it can attach the isolation headers that unlock SharedArrayBuffer.
+        var flagged = false;
+        try { flagged = !!sessionStorage.getItem("coi-reload"); } catch (e) { flagged = true; }
+        if (!navigator.serviceWorker.controller && !window.crossOriginIsolated && !flagged) {
+          try { sessionStorage.setItem("coi-reload", "1"); } catch (e) { /* ignore */ }
+          navigator.serviceWorker.ready.then(function () { location.reload(); });
+        }
+      }).catch(function () { /* offline install is optional */ });
+    }
+  })();
+
   window.addEventListener("hashchange", applyHash);
   applyHash();
 })();

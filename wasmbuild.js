@@ -22,6 +22,25 @@ var cmd = [
 
 cp.execSync(cmd, { cwd: dir, stdio: "inherit" });
 
+// thread-safe variant for the multi-core engine: same kernels over ONE shared memory
+var cmdPar = [
+  "clang", "--target=wasm32", "-O3", "-nostdlib", "-matomics", "-mbulk-memory",
+  "-Wl,--no-entry",
+  "-Wl,--import-memory",
+  "-Wl,--shared-memory",
+  "-Wl,--initial-memory=1114112",
+  "-Wl,--max-memory=4294901760",
+  "-Wl,-z,stack-size=65536",
+  "-o", "engine_par.wasm", "engine_par.c"
+].join(" ");
+var parB64 = "";
+try {
+  cp.execSync(cmdPar, { cwd: dir, stdio: "inherit" });
+  parB64 = fs.readFileSync(path.join(dir, "engine_par.wasm")).toString("base64");
+} catch (e) {
+  console.warn("engine_par.wasm not built (" + e.message + ") — multi-core will use the JS kernels");
+}
+
 var wasm = fs.readFileSync(path.join(dir, "engine.wasm"));
 var b64 = wasm.toString("base64");
 
@@ -36,6 +55,7 @@ var out = [
   "})(typeof self !== \"undefined\" ? self : this, function () {",
   "  \"use strict\";",
   "  var B64 = \"" + b64 + "\";",
+  "  var PAR_B64 = \"" + parB64 + "\";",
   "  var cached = null;",
   "  function decode(s) {",
   "    if (typeof atob === \"function\") {",
@@ -62,7 +82,7 @@ var out = [
   "    return cached;",
   "  }",
   "  function setProgress(cb) { progressCb = cb; }",
-  "  return { init: init, setProgress: setProgress, generated: true };",
+  "  return { init: init, setProgress: setProgress, parB64: PAR_B64, generated: true };",
   "});",
   ""
 ].join("\n");

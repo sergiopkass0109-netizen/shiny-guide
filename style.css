@@ -223,3 +223,12 @@ footer a:hover { text-decoration: underline; }
 }
 .verify b { color: var(--accent-2); font-weight: 600; }
 .verify .muted { color: var(--muted); }
+
+.status-line {
+  margin: 8px 0 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+.status-line .chip { margin-left: 10px; color: var(--accent-2); border-color: var(--accent-2); }

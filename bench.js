@@ -34,6 +34,30 @@ ns.forEach(function (n) {
 });
 console.log("\n(exponent < 1.00 = sublinear: doubling n less than doubles the time)");
 
+// ---- multi-core comparison on the largest tier that fits a coffee break
+var PAR = null;
+try { PAR = require("./parallel.js"); } catch (e) { PAR = null; }
+if (PAR && PAR.available() && PAR.threads() >= 2) {
+  var K = PAR.threads();
+  var nPar = ns.indexOf(1e12) !== -1 ? 1e12 : 1e10;
+  var t1 = Date.now();
+  var single = NP.nthPrime(nPar);
+  var tSingle = Date.now() - t1;
+  var t2 = Date.now();
+  NP.nthPrimeAsync(nPar, {
+    engineLabel: "multi-core ×" + K,
+    parallelMinX: 1e9,
+    countAsync: function (x0, cb) { return PAR.primeCountParallel(x0, { threads: K, onProgress: cb }); }
+  }).then(function (par) {
+    var tPar = Date.now() - t2;
+    console.log("\nmulti-core: p(10^" + Math.round(Math.log10(nPar)) + ") single-thread " +
+      (tSingle / 1000).toFixed(1) + " s → " + K + " threads " + (tPar / 1000).toFixed(1) + " s  (" +
+      (tSingle / tPar).toFixed(2) + "× faster, " + (par.value === single.value ? "identical answer ✓" : "*** MISMATCH ***") + ")");
+  });
+} else {
+  console.log("\n(multi-core engine unavailable in this environment)");
+}
+
 function pad(s, w) {
   while (s.length < w) s = " " + s;
   return s;

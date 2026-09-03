@@ -588,7 +588,7 @@
     if (!W) return null;
     var w = W.init();
     var r = isqrt(x);
-    var smallOff = 1024;
+    var smallOff = 131072; // above the module's shadow stack + globals region
     var largeOff = smallOff + 4 * (r + 2);
     largeOff += (8 - (largeOff % 8)) % 8; // u64 table must be 8-aligned
     var need = largeOff + 8 * (r + 2) + 65536;
@@ -843,9 +843,6 @@
   function nthPrimeByCounting(n, onProgress) {
     var tEst = nowMs();
     var x0 = guessNthPrime(n);
-    // Base primes cover √(any point the count or walk can visit): the n-th
-    // prime is ≤ upperBoundForNthPrime(n) by Rosser's theorem.
-    var basePrimes = primesUpTo(isqrt(upperBoundForNthPrime(n)) + 1);
     var tCount = nowMs();
     var cb = onProgress ? function (f) { onProgress("count", f); } : null;
     var c0 = null;
@@ -855,10 +852,28 @@
       if (c0 !== null) engineName = "compiled C/WebAssembly";
     }
     if (c0 === null) c0 = primeCount(x0, cb);
+    return nthPrimeFromCount(n, x0, c0, {
+      engine: engineName,
+      msEstimate: round1(tCount - tEst),
+      msCount: round1(nowMs() - tCount),
+      onProgress: onProgress
+    });
+  }
+
+  // Finish an n-th prime query from an exact count c0 = π(x0): sieve-walk to
+  // the answer and attach the local verification.  Public so an external
+  // counter (the multi-core engine) can supply c0.
+  function nthPrimeFromCount(n, x0, c0, opts) {
+    opts = opts || {};
+    n = checkN(n);
+    var onProgress = opts.onProgress;
     var tWalk = nowMs();
+    // Base primes cover √(any point the walk can visit): the n-th prime is
+    // ≤ upperBoundForNthPrime(n) by Rosser's theorem.
+    var basePrimes = primesUpTo(isqrt(upperBoundForNthPrime(n)) + 1);
     var value = -1;
     var walked = 0;
-    var seg, i, num;
+    var seg, i;
 
     var win = walkWindow(Math.abs(n - c0), x0);
 
@@ -915,19 +930,20 @@
     if (value < 0) throw new Error("internal error: walk failed to locate prime");
     var tEnd = nowMs();
     if (onProgress) onProgress("done", 1);
-    return {
+    var msEst = opts.msEstimate || 0, msCnt = opts.msCount || 0;
+    return withNeighbors({
       n: n,
       value: value,
-      method: "R-inverse estimate + Lucy_Hedgehog exact count [" + engineName + "] + segmented sieve walk",
+      method: "R-inverse estimate + Lucy_Hedgehog exact count [" + (opts.engine || "external counter") + "] + segmented sieve walk",
       guess: x0,
       piAtGuess: c0,
       offBy: n - c0, // primes between guess and answer (sign = direction)
       walked: walked,
-      msEstimate: round1(tCount - tEst),
-      msCount: round1(tWalk - tCount),
+      msEstimate: round1(msEst),
+      msCount: round1(msCnt),
       msWalk: round1(tEnd - tWalk),
-      ms: round1(tEnd - tEst)
-    };
+      ms: round1(msEst + msCnt + (tEnd - tWalk))
+    });
   }
 
   function nowMs() {
@@ -943,13 +959,42 @@
   // public API
   // ------------------------------------------------------------------
 
-  function nthPrime(n, opts) {
+  function checkN(n) {
     n = typeof n === "string" ? Number(n) : n;
     if (typeof n !== "number" || !Number.isFinite(n) || !Number.isInteger(n)) {
       throw new RangeError("n must be an integer");
     }
     if (n < 1) throw new RangeError("n must be ≥ 1 (the 1st prime is 2)");
     if (n > MAX_N) throw new RangeError("n must be ≤ 2×10^14 (answers stay below 2^53)");
+    return n;
+  }
+
+  // Promise-returning variant: opts.countAsync(x, onProgress) → Promise<π(x)>
+  // (e.g. the multi-core engine in parallel.js) supplies the count; the
+  // estimate and the walk are the same as nthPrime.
+  function nthPrimeAsync(n, opts) {
+    opts = opts || {};
+    var n0;
+    try { n0 = checkN(n); } catch (e) { return Promise.reject(e); }
+    var minX = opts.parallelMinX || 1e12; // measured crossover vs the single-thread wasm core
+    if (!opts.countAsync || n0 <= SIEVE_PATH_MAX) return Promise.resolve(nthPrime(n0, opts));
+    var tEst = nowMs();
+    var x0 = guessNthPrime(n0);
+    if (x0 < minX) return Promise.resolve(nthPrime(n0, opts));
+    var tCount = nowMs();
+    var prog = opts.onProgress;
+    return opts.countAsync(x0, prog ? function (f) { prog("count", f); } : null).then(function (c0) {
+      return nthPrimeFromCount(n0, x0, c0, {
+        engine: opts.engineLabel || "external counter",
+        msEstimate: round1(tCount - tEst),
+        msCount: round1(nowMs() - tCount),
+        onProgress: prog
+      });
+    });
+  }
+
+  function nthPrime(n, opts) {
+    n = checkN(n);
     var onProgress = opts && opts.onProgress;
     var t0 = nowMs();
 
@@ -960,11 +1005,14 @@
       var v = nthPrimeBySieve(n);
       return withNeighbors({ n: n, value: v, method: "sieve of Eratosthenes (direct)", ms: round1(nowMs() - t0) });
     }
-    return withNeighbors(nthPrimeByCounting(n, onProgress));
+    return nthPrimeByCounting(n, onProgress); // neighbours attached inside
   }
 
   return {
     nthPrime: nthPrime,
+    nthPrimeAsync: nthPrimeAsync,
+    nthPrimeFromCount: nthPrimeFromCount,
+    guessNthPrime: guessNthPrime,
     isPrime: isPrime,
     countPrimes: countPrimes,
     primeNeighbors: primeNeighbors,

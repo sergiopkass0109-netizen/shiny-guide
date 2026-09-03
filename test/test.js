@@ -376,6 +376,8 @@ section("index.html is self-contained and in sync (run `npm run build` if not)")
   var engine = fs.readFileSync(path.join(root, "nthprime.js"), "utf8").trim();
   var style = fs.readFileSync(path.join(root, "style.css"), "utf8").trim();
   var wasmjs = fs.readFileSync(path.join(root, "engine-wasm.js"), "utf8").trim();
+  var parjs = fs.readFileSync(path.join(root, "parallel.js"), "utf8").trim();
+  check(html.indexOf(parjs) !== -1, "index.html embeds current parallel.js");
   check(html.indexOf(engine) !== -1, "index.html embeds current nthprime.js");
   check(html.indexOf(style) !== -1, "index.html embeds current style.css");
   check(html.indexOf(wasmjs) !== -1, "index.html embeds current engine-wasm.js");
@@ -384,7 +386,48 @@ section("index.html is self-contained and in sync (run `npm run build` if not)")
     "no external file references");
 })();
 
-// ----------------------------------------------------------------
-console.log("\n" + checks + " checks, " + failures + " failure(s)" + (SLOW ? " [slow mode]" : ""));
-if (failures > 0) process.exit(1);
-console.log("ALL TESTS PASSED");
+// ---------------------------------------------------------------- 13
+section("multi-core engine (SharedArrayBuffer + worker_threads) agrees exactly");
+var parallelDone = (function () {
+  var PAR;
+  try { PAR = require("../parallel.js"); } catch (e) { PAR = null; }
+  if (!PAR || !PAR.available()) { console.log("  (multi-core engine unavailable here — skipped)"); return Promise.resolve(); }
+  var t0 = Date.now();
+  // [x, threads]  — 0 = auto; small x exercises the coordinator-only path,
+  // larger x the banded parallel updates; a prime x and an odd thread count
+  // probe the band boundaries
+  var cases = [[1e6, 2], [2e9, 3], [3000000007, 5], [1e10, 0], [12345678901, 4]];
+  var chain = Promise.resolve();
+  cases.forEach(function (c) {
+    chain = chain.then(function () {
+      return PAR.primeCountParallel(c[0], { threads: c[1] || undefined }).then(function (v) {
+        eq(v, NP.primeCount(c[0]), "multi-core π(" + c[0] + ") threads=" + (c[1] || "auto"));
+      });
+    });
+  });
+  chain = chain.then(function () {
+    return NP.nthPrimeAsync(1e9, {
+      engineLabel: "multi-core (test)",
+      parallelMinX: 1e9,
+      countAsync: function (x, cb) { return PAR.primeCountParallel(x, { onProgress: cb }); }
+    }).then(function (r) {
+      eq(r.value, 22801763489, "nthPrimeAsync(10^9) via multi-core = billionth prime");
+      check(r.prev < r.value && r.value < r.next, "…carries verified neighbours");
+      check(/multi-core/.test(r.method), "…labels the engine");
+    });
+  });
+  chain = chain.then(function () {
+    var job = PAR.primeCountParallel(1e11, { threads: 2 });
+    job.cancel();
+    return job.then(function () { check(false, "cancelled job resolved"); },
+                    function (e) { check(/cancelled/.test(e.message), "cancel() rejects the job promptly"); });
+  });
+  return chain.then(function () { console.log("  ok (" + PAR.threads() + " threads here)" + fmtMs(t0)); },
+                    function (err) { check(false, "multi-core engine error: " + (err && err.message)); });
+})();
+
+parallelDone.then(function () {
+  console.log("\n" + checks + " checks, " + failures + " failure(s)" + (SLOW ? " [slow mode]" : ""));
+  if (failures > 0) process.exit(1);
+  console.log("ALL TESTS PASSED");
+});
