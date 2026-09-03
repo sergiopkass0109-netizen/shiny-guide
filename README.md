@@ -45,12 +45,39 @@ Measured on this 4-vCPU machine, answers identical to the single-thread core:
 | π(10¹³) | 3.97 s | 1.79 s | **2.2×** |
 | p(10¹²) end-to-end | ~9 s | **3.9 s** | 2.3× |
 
-More cores, more speed — the work is ~99% parallel above 10¹¹. Below ~10¹²
-the page stays single-threaded (thread wake-ups cost more than they save).
+More cores, more speed — the work is ~99% parallel above 10¹¹. The page
+switches to multi-core at x ≈ 10¹² on 4 threads, earlier with more cores
+(below that, thread wake-ups cost more than they save). While the cores
+count, the compute worker sieves the base primes the final walk needs, so
+the walk that used to take up to a second at the top end now takes ~0.1 s.
+(A SIMD build of the kernels was measured at +1–3% and dropped: the work is
+memory-bandwidth-bound, so more lanes don't help — but more cores do.)
 The test suite (2, 3, 4, 5 and auto threads, prime and composite x, cancel)
 requires digit-for-digit agreement with the three single-thread engines —
 which is how a representation mismatch between the C kernels and the
 JavaScript views (u64 vs f64 of the same bytes) was caught before release.
+
+## Running it at full speed
+
+1. **Use the hosted app** (the GitHub Pages link) in **Chrome, Edge or
+   Firefox on a desktop or laptop**. Multi-core needs cross-origin isolation,
+   which the app's service worker provides there; the header must read
+   *multi-core ready · N threads*. The very first visit reloads once to turn
+   it on. Safari doesn't honour the worker-added isolation headers, so it
+   runs single-threaded; phones are fine to ~10¹¹.
+2. **Install it** (*install as app* in the header): it opens in its own
+   window with the service worker already warm, and works offline.
+3. **Plug in, and close memory-hungry tabs.** The count is limited by memory
+   bandwidth, not arithmetic, so a browser full of heavy tabs slows it; a
+   laptop on battery may throttle cores.
+4. **Know the sizes.** Up to 10¹² is seconds; 10¹³ is about half a minute on
+   4 threads; 10¹⁴ is minutes; anything ≥ 2×10¹³ needs ~1 GB of free RAM.
+   Use *cancel* freely — it stops every thread at once.
+5. **For the biggest jobs use the command line**, which has no browser memory
+   ceiling: `node cli.js 2e14` uses every core (add `--threads K` to tune —
+   the number of *physical* cores is usually best), and
+   `node cli.js --pi 1e13 --engine all` runs all engines and confirms they agree.
+6. **A saved copy of `index.html`** works anywhere, offline, single-threaded.
 
 ## It's an app, not a page
 

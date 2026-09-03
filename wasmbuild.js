@@ -10,7 +10,7 @@ var path = require("path");
 
 var dir = __dirname;
 var cmd = [
-  "clang", "--target=wasm32", "-O3", "-nostdlib", "-msimd128",
+  "clang", "--target=wasm32", "-O3", "-nostdlib",
   "-Wl,--no-entry",
   "-Wl,--export-memory",
   "-Wl,--allow-undefined",
@@ -24,7 +24,7 @@ cp.execSync(cmd, { cwd: dir, stdio: "inherit" });
 
 // thread-safe variant for the multi-core engine: same kernels over ONE shared memory
 var cmdPar = [
-  "clang", "--target=wasm32", "-O3", "-nostdlib", "-msimd128", "-matomics", "-mbulk-memory",
+  "clang", "--target=wasm32", "-O3", "-nostdlib", "-matomics", "-mbulk-memory",
   "-Wl,--no-entry",
   "-Wl,--import-memory",
   "-Wl,--shared-memory",
