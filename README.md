@@ -63,10 +63,25 @@ kernels ship in two builds — baseline and SIMD (auto-vectorised fills,
 +10–20%) — and the loader picks the SIMD one only where
 `WebAssembly.validate` accepts it, so old browsers keep working. The test
 suite (2, 3, 4, 5 and auto threads, both kernel kinds, prime and composite
-x, cancel) requires digit-for-digit agreement with the three single-thread
-engines — which is how a representation mismatch between the C kernels and
-the JavaScript views (u64 vs f64 of the same bytes) was caught before
-release.
+x, cancel, and repeated runs) requires digit-for-digit agreement with the
+three single-thread engines — which is how a representation mismatch between
+the C kernels and the JavaScript views (u64 vs f64 of the same bytes) was
+caught before release.
+
+**A barrier race, found and fixed in 2.6.** Stress-testing the multi-core
+engine under CPU load (three busy processes on a 4-core box) produced a
+wrong count about once in 40 runs — sometimes off by thousands, once by
+10¹⁴. Logging every thread's executed generations showed one thread running
+a task *twice* while another skipped it: the coordinator bumps the
+generation counter and then notifies; a thread that had already seen the
+new counter, finished its task and gone back to waiting was woken by that
+late notify, re-read the same generation, ran the task again, and its second
+decrement released the barrier before the slower thread had run it at all.
+The fix is a re-check after waking (`if (gen === seen) continue`). 2.5 and
+2.4 carried this bug; every check we ever ran in the browser was exact, but
+a heavily loaded machine could have shown a wrong number. After the fix,
+840 runs under the same load were all exact, and the suite now repeats
+multi-core runs with both kernel kinds.
 
 ## Running it at full speed
 
@@ -210,10 +225,26 @@ the same recurrence is evaluated:
   prime in the classical order; its reads of `large[m]` with I₀ < m ≤ r add
   back the sweep's contributions of the later primes, so every value read is
   exactly S at the right stage.
+* **Prefixes split around the sweep (2.6).** The prefix reads above I₀
+  need one correction per later prime of the block; doing the first half of
+  the block's prefixes *before* the sweep (correcting for the earlier primes
+  instead) halves those ~4×10⁷ divisions at x = 3×10¹³ — measured +4–6% in
+  every mode, single- and multi-thread.
 * **What did *not* help, measured:** a reciprocal table instead of division
   (−26%), hand-written two-lane SIMD division (−17%, lane moves are
-  expensive), signed float→int conversion (−44%). Auto-vectorised fills
-  (+10–20%) and non-trapping float→int conversion (+13%) did, and stayed.
+  expensive), signed float→int conversion (−44%), a split division/gather
+  loop with `f64x2.div` (−14 to −21%). Auto-vectorised fills (+10–20%) and
+  non-trapping float→int conversion (+13%) did, and stayed.
+* **The primes above ∛x, three ways, all rejected (2.6).** For p³ > x the
+  passes commute (every read is final), so they can be summed per index
+  with no barriers at all. Three orders were built and verified exact:
+  prime-major with per-thread accumulators (+13% single-thread here, but
+  its reads scatter over the whole table and it stopped scaling across
+  threads), pairs sorted by the product i·p in cache-sized windows (+2–6%
+  single, −20% multi: the cursor bookkeeping cost more than the locality it
+  bought), and groups of 32 primes per index (−3%). The block sweep already
+  processes 32 primes per index segment — the same locality with no extra
+  machinery — and stayed.
 
 Every variant was accepted only after agreeing digit-for-digit with the
 unchanged JavaScript engine on ~3400 inputs, then with the LMO engine in
@@ -245,7 +276,7 @@ Milliseconds.
 
 ## How it is verified
 
-`npm test` (~10 s) runs 12 independent layers, 259 checks (more in --slow / --huge):
+`npm test` (~12 s) runs 12 independent layers, 260 checks (more in --slow / --huge):
 
 1. `primesUpTo` vs brute-force trial division;
 2. table/sieve paths vs an independently generated prime list;
@@ -265,7 +296,8 @@ Milliseconds.
 11. `countPrimes` (the page's π(x) mode) and the neighbouring-prime
     verification attached to every answer, vs an independent prime list;
 12. the self-contained `index.html` embeds the current engine byte-for-byte;
-    and the multi-core engine, with both kernel kinds, on 2–5 and auto threads.
+    and the multi-core engine, with both kernel kinds, on 2–5 and auto
+    threads, including twelve repeated runs (the barrier regression).
 
 Top-end results verified this way: π(10¹³) = 346,065,536,839 and
 π(10¹⁴) = 3,204,941,750,802 (both engines, both correct), and
