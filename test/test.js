@@ -452,6 +452,18 @@ var parallelDone = (function () {
       check(/multi-core/.test(r.method), "…labels the engine");
     });
   });
+  // barrier regression: a late wake-up notify once let a thread run a task
+  // twice while another skipped it (wrong answers about 1 run in 40 under
+  // CPU load); repeated runs with both kernel kinds must all agree
+  var reps = [];
+  for (var rr = 0; rr < 12; rr++) reps.push([3e9, rr % 2 ? 3 : 5, rr % 3 ? "js" : "wasm"]);
+  var repBad = 0;
+  reps.forEach(function (c) {
+    chain = chain.then(function () {
+      return PAR.primeCountParallel(c[0], { threads: c[1], kernels: c[2] }).then(function (v) { if (v !== 144449537) repBad++; });
+    });
+  });
+  chain = chain.then(function () { check(repBad === 0, "12 repeated multi-core runs (3/5 threads, both kernel kinds) all exact"); });
   chain = chain.then(function () {
     var job = PAR.primeCountParallel(1e11, { threads: 2 });
     job.cancel();

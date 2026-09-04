@@ -10,6 +10,9 @@
  *
  * Block parameters (doubles at bpOff, written by the coordinator):
  *   bp[0] = k (primes in the block)   bp[1] = I0 (prefix bound)   bp[2] = r
+ *   bp[3] = 1 once the block's sweep has run (prefix reads above I0 then add
+ *           back the later primes' contributions; before it they subtract
+ *           the earlier primes')
  *   bp[8 + 5j + 0..4] = P[j], XP[j] = floor(x/P[j]), SP1[j] = pi(P[j]-1),
  *                      IMAX[j] = min(r, floor(x/P[j]^2)), G[j] = isqrt(XP[j])
  * A classical single-prime pass is a block with k = 1 and I0 = r.
@@ -97,14 +100,17 @@ void init_range(u32 smallOff, u32 largeOff, u64 x, u64 a, u64 b) {
 }
 
 /* prefix pass of block prime j over i in [a, b] (b <= min(I0, IMAX[j])):
- * reads of large[i*p] are direct while i*p <= I0, corrected for the sweep's
- * contributions of primes l >= j while i*p <= r, and small[] beyond. */
+ * reads of large[i*p] are direct while i*p <= I0; for I0 < i*p <= r the
+ * value S_{p_j - 1}(x/m) is recovered from the sweep region (before the
+ * sweep: subtract the earlier primes' terms; after it: add back the later
+ * primes'); beyond r the value comes from small[]. */
 __attribute__((export_name("prefix_range")))
 void prefix_range(u32 smallOff, u32 largeOff, u32 bpOff, u32 j, u64 a, u64 b) {
   u32 *small = (u32 *)(uintptr_t)smallOff;
   double *large = (double *)(uintptr_t)largeOff;
   const double *bp = (const double *)(uintptr_t)bpOff;
   u64 k = (u64)bp[0], I0 = (u64)bp[1], r = (u64)bp[2];
+  int afterSweep = bp[3] != 0.0;
   u64 p = BP_P(j), xp = BP_XP(j), g = BP_G(j);
   double s = (double)BP_SP1(j);
   u64 isw = r / p; if (isw > b) isw = b;
@@ -114,7 +120,8 @@ void prefix_range(u32 smallOff, u32 largeOff, u32 bpOff, u32 j, u64 a, u64 b) {
   for (; i <= isw; i++) {
     u64 m = i * p;
     double val = large[m];
-    for (u64 l = j; l < k && BP_IMAX(l) >= m; l++) val += (double)small[fdiv(BP_XP(l), m)] - (double)BP_SP1(l);
+    if (afterSweep) { for (u64 l = j; l < k && BP_IMAX(l) >= m; l++) val += (double)small[fdiv(BP_XP(l), m)] - (double)BP_SP1(l); }
+    else            { for (u64 l = 0; l < j && BP_IMAX(l) >= m; l++) val -= (double)small[fdiv(BP_XP(l), m)] - (double)BP_SP1(l); }
     large[i] -= val - s;
   }
   tail_range(small, large, i, b, xp, s, g);

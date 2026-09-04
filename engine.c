@@ -22,9 +22,10 @@
  *    small-pass of the block touches — so the k passes are applied to
  *    large[(I0, imax]] in ONE cache-blocked sweep (segments of SEG entries),
  *    each prime's runs going to a difference array that one prefix-sum pass
- *    per segment materialises.  The prefix i <= I0 is then done prime by
- *    prime in the classical order (reads of large[m] with I0 < m <= r add
- *    back the sweep's contributions of the later primes).
+ *    per segment materialises.  The prefix i <= I0 is done prime by prime in
+ *    the classical order, half of the block before the sweep and half after,
+ *    so that a read of large[m] with I0 < m <= r needs at most k/2
+ *    corrections for the sweep's contributions of the other primes
  *
  * Build: clang --target=wasm32 -O3 -nostdlib -fno-builtin -mnontrapping-fptoint
  *        [-msimd128]                                        (see wasmbuild.js)
@@ -129,6 +130,28 @@ static inline void small_pass(u32 *small, u64 r, u64 p, u64 sp1) {
   }
 }
 
+/* prefix pass of block prime j over i in [1, imaxj], imaxj <= min(I0, IMAX[j]).
+ * Reads of large[i*p]: direct while i*p <= I0; for I0 < i*p <= r the value
+ * S_{p_j - 1}(x/m) is recovered from the sweep region — before the sweep by
+ * subtracting the block's earlier primes, after it by adding back the later
+ * ones (each T_l(m) = small[floor(XP_l/m)] - SP1_l, an index < p1^2, frozen). */
+static inline void prefix_pass(const u32 *small, u64 *large, u64 r, u64 I0, u64 k, u64 j, int afterSweep,
+                               const u64 *P, const u64 *XP, const u64 *SP1, const u64 *IMAX, const u64 *G, u64 imaxj) {
+  u64 pj = P[j], sp1 = SP1[j], xp = XP[j];
+  u64 isw = r / pj; if (isw > imaxj) isw = imaxj;
+  u64 i = 1;
+  u64 i1 = I0 / pj; if (i1 > isw) i1 = isw;
+  for (; i <= i1; i++) large[i] -= large[i * pj] - sp1;     /* i*pj <= I0: untouched by the sweep */
+  for (; i <= isw; i++) {
+    u64 m = i * pj;
+    u64 val = large[m];
+    if (afterSweep) { for (u64 l = j; l < k && IMAX[l] >= m; l++) val += (u64)small[fdiv(XP[l], m)] - SP1[l]; }
+    else            { for (u64 l = 0; l < j && IMAX[l] >= m; l++) val -= (u64)small[fdiv(XP[l], m)] - SP1[l]; }
+    large[i] -= val - sp1;
+  }
+  tail_range(small, large, i, imaxj, xp, sp1, G[j]);
+}
+
 __attribute__((export_name("pi_lucy")))
 u64 pi_lucy(u64 x, u32 smallOff, u32 largeOff, u32 scratchOff) {
   if (x < 2) return 0;
@@ -183,7 +206,17 @@ u64 pi_lucy(u64 x, u32 smallOff, u32 largeOff, u32 scratchOff) {
       G[j] = isqrt64(XP[j]);
     }
 
-    /* 1. one cache-blocked sweep of large[(I0, IMAX[0]]] for all k primes.
+    u64 half = k / 2;
+
+    /* 1. prefixes of the first half, in the classical order, each followed
+     *    by its small-pass (so small[] is in the right state for the next
+     *    prime's reads at indices >= p1^2); the sweep has not run yet */
+    for (u64 j = 0; j < half; j++) {
+      prefix_pass(small, large, r, I0, k, j, 0, P, XP, SP1, IMAX, G, IMAX[j] < I0 ? IMAX[j] : I0);
+      small_pass(small, r, P[j], SP1[j]);
+    }
+
+    /* 2. one cache-blocked sweep of large[(I0, IMAX[0]]] for all k primes.
      *    i > r/p1 => i*P[j] > r, so every read is small[floor(XP[j]/i)];
      *    i > x/p1^3 => that index is < p1^2 <= P[j]^2, a region untouched by
      *    every small-pass of this block — so all k passes commute here. */
@@ -200,26 +233,10 @@ u64 pi_lucy(u64 x, u32 smallOff, u32 largeOff, u32 scratchOff) {
       L = R + 1;
     }
 
-    /* 2. prefix i <= I0, prime by prime in the classical order, each
-     *    followed by its small-pass (so small[] is in the right state for
-     *    the next prime's reads at indices >= p1^2) */
-    for (u64 j = 0; j < k; j++) {
-      u64 pj = P[j], sp1 = SP1[j], xp = XP[j];
-      u64 imaxj = IMAX[j] < I0 ? IMAX[j] : I0;
-      u64 isw = r / pj; if (isw > imaxj) isw = imaxj;
-      u64 i = 1;
-      u64 i1 = I0 / pj; if (i1 > isw) i1 = isw;
-      for (; i <= i1; i++) large[i] -= large[i * pj] - sp1;     /* i*pj <= I0: untouched by the sweep */
-      for (; i <= isw; i++) {
-        /* I0 < m <= r: the sweep already applied every prime l >= j whose
-         * imax reaches m; adding those back gives S_{p_j - 1}(x/m) */
-        u64 m = i * pj;
-        u64 val = large[m];
-        for (u64 l = j; l < k && IMAX[l] >= m; l++) val += (u64)small[fdiv(XP[l], m)] - SP1[l];
-        large[i] -= val - sp1;
-      }
-      tail_range(small, large, i, imaxj, xp, sp1, G[j]);
-      small_pass(small, r, pj, sp1);
+    /* 3. prefixes of the second half, now correcting for the sweep */
+    for (u64 j = half; j < k; j++) {
+      prefix_pass(small, large, r, I0, k, j, 1, P, XP, SP1, IMAX, G, IMAX[j] < I0 ? IMAX[j] : I0);
+      small_pass(small, r, P[j], SP1[j]);
     }
     p = P[k - 1] + 1;
   }

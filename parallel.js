@@ -130,15 +130,17 @@
       }
       // prefix pass of block prime j over [a, b] (b ≤ min(I0, IMAX[j]))
       function prefixJS(j, a, b) {
-        var k = bp[0], I0 = bp[1];
+        var k = bp[0], I0 = bp[1], after = bp[3] !== 0;
         var p = bp[8 + 5 * j], xp = bp[9 + 5 * j], sp1 = bp[10 + 5 * j], g = bp[12 + 5 * j];
         var isw = Math.min(b, Math.floor(r / p)), i1 = Math.min(isw, Math.floor(I0 / p));
-        var i = a;
+        var i = a, l;
         for (; i <= i1; i++) large[i] -= large[i * p] - sp1;
         for (; i <= isw; i++) {
-          // I0 < m ≤ r: add back the sweep's contributions of primes l ≥ j
+          // I0 < m ≤ r: recover S at stage p_j from the sweep region (before the
+          // sweep: subtract the earlier primes' terms; after it: add back the later ones)
           var mm = i * p, val = large[mm];
-          for (var l = j; l < k && bp[11 + 5 * l] >= mm; l++) val += small[Math.floor(bp[9 + 5 * l] / mm)] - bp[10 + 5 * l];
+          if (after) { for (l = j; l < k && bp[11 + 5 * l] >= mm; l++) val += small[Math.floor(bp[9 + 5 * l] / mm)] - bp[10 + 5 * l]; }
+          else { for (l = 0; l < j && bp[11 + 5 * l] >= mm; l++) val -= small[Math.floor(bp[9 + 5 * l] / mm)] - bp[10 + 5 * l]; }
           large[i] -= val - sp1;
         }
         tailJS(i, b, xp, sp1, g);
@@ -218,7 +220,14 @@
         var seen = 0;
         for (;;) {
           Atomics.wait(ctrl, GEN, seen);
-          seen = Atomics.load(ctrl, GEN);
+          var gen = Atomics.load(ctrl, GEN);
+          // The coordinator bumps GEN and then notifies.  A thread that saw the
+          // new GEN before the notify, finished the task and is waiting again
+          // gets woken by that late notify: with GEN unchanged there is
+          // nothing new — running the task twice would also release the
+          // barrier before a slower thread has run it at all.
+          if (gen === seen) continue;
+          seen = gen;
           var type = par[0];
           if (type === T_EXIT) break;
           task(type);
@@ -250,7 +259,7 @@
       // block parameters (shared with every thread and both kernel kinds)
       var P = new Array(KMAX);
       function setBlock(k, I0) {
-        bp[0] = k; bp[1] = I0; bp[2] = r;
+        bp[0] = k; bp[1] = I0; bp[2] = r; bp[3] = 0;      // bp[3]: sweep not run yet
         for (var j = 0; j < k; j++) {
           var pj = P[j], xp = Math.floor(x / pj);
           bp[8 + 5 * j] = pj;
@@ -327,16 +336,25 @@
         if (p1 * p1 * p1 <= x) I0 = Math.max(I0, Math.floor(x / (p1 * p1 * p1)));
         setBlock(k, I0);
         var sweepHi = bp[11];                                   // IMAX[0]
+        var perPrime = !(I0 < PAR_MIN && p1 * p1 > r);
+        var half = perPrime ? (k >> 1) : 0;
+        // prefixes of the first half before the sweep (reads above I0 then
+        // need at most k/2 corrections), the rest after it
+        for (j = 0; j < half; j++) {
+          prefixPass(j, Math.min(I0, bp[11 + 5 * j]));
+          smallPass(P[j], bp[10 + 5 * j]);
+        }
         if (sweepHi > I0) {
           if (sweepHi - I0 >= DYN_MIN) dispatch(T_SWEEP, I0 + 1, sweepHi, chunkFor(sweepHi - I0), 0);
           else if (kern) kern.sweep_range(SO, LO, BP, DO, BigInt(I0 + 1), BigInt(sweepHi));
           else sweepJS(I0 + 1, sweepHi);
         }
-        if (I0 < PAR_MIN && p1 * p1 > r) {
+        bp[3] = 1;                                              // sweep done
+        if (!perPrime) {
           // every prefix is coordinator-only and there are no small-passes: one call
           if (kern) kern.block_tail(SO, LO, BP); else blockTailJS();
         } else {
-          for (j = 0; j < k; j++) {
+          for (j = half; j < k; j++) {
             prefixPass(j, Math.min(I0, bp[11 + 5 * j]));
             smallPass(P[j], bp[10 + 5 * j]);
           }
@@ -483,6 +501,6 @@
     available: available,
     threads: threads,
     kernels: function () { return lastKernels; }, // "wasm+simd", "wasm" or "js" for the last completed count
-    version: "2.0.0"
+    version: "2.1.0"
   };
 });
