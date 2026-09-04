@@ -605,21 +605,78 @@
     return v;
   }
 
-  // Engine selector.  Measured head-to-head in JS, the Lucy_Hedgehog tables
-  // beat LMO(α=1) by ~2× at every size we support (LMO's asymptotic edge of
-  // x^{1/12} cannot overcome its Fenwick/segment constants below ~10^17),
-  // so Lucy computes and LMO serves as the independent cross-checking
-  // engine (see test/test.js and the `engine` option of the CLI).
+  // ------------------------------------------------------------------
+  // Deléglise–Rivat (compiled, engine.c): the research-grade algorithm,
+  // O(x^{2/3}/log²x) time and O(√x) memory.  y = α·∛x; α balances the
+  // sieve over [1, x/y] against the number of easy leaves — measured optimum
+  // ≈ 8 from 10¹¹ on, 12 above 10¹⁴ (see README).  Below 10⁹ the Lucy
+  // tables are as fast and simpler.
+  // ------------------------------------------------------------------
+  var DR_MIN_X = 1e9;
+  function drAlpha(x) {
+    if (x < 1e11) return 4;
+    if (x < 1e14) return 8;
+    return 12;
+  }
+
+  // exact π(x) on the compiled Deléglise–Rivat engine; null ⇒ unavailable
+  function primeCountDR(x, onProgress, opts) {
+    var W = getWasmModule();
+    if (!W || !W.init().exports.pi_dr) return null;
+    var w = W.init();
+    if (x < 1e6) return null;
+    var r = isqrt(x);
+    var alpha = (opts && opts.alpha) || drAlpha(x);
+    var y = Math.floor(icbrt(x) * alpha);
+    if (y > r - 1) y = r - 1;
+    if (y < 17) y = 17;
+    var base = 131072; // above the module's shadow stack + globals region
+    var need = base + Number(w.exports.dr_bytes(BigInt(x), BigInt(y))) + 65536;
+    var have = w.memory.buffer.byteLength;
+    if (need > have) {
+      try { w.memory.grow(Math.ceil((need - have) / 65536)); }
+      catch (e) { return null; }
+    }
+    W.setProgress(onProgress || null);
+    var v = w.exports.pi_dr(BigInt(x), BigInt(y), base);
+    W.setProgress(null);
+    if (v === BigInt.asUintN(64, -1n) || v === -1n) return null; // outside the engine's domain: caller falls back
+    return Number(v);
+  }
+
+  // the fastest exact engine available for x, with its name
+  function bestCount(x, cb) {
+    var v;
+    if (x >= DR_MIN_X && getWasmModule()) {
+      v = primeCountDR(x, cb);
+      if (v !== null) return { value: v, engine: "Deléglise–Rivat, compiled C/WebAssembly" };
+    }
+    if (x >= 1e7 && getWasmModule()) {
+      v = primeCountWasm(x, cb);
+      if (v !== null) return { value: v, engine: "Lucy_Hedgehog, compiled C/WebAssembly" };
+    }
+    return { value: primeCount(x, cb), engine: "Lucy_Hedgehog/JS" };
+  }
+
+  // Engine selector: "dr" (Deléglise–Rivat, compiled), "wasm" (Lucy,
+  // compiled), "lucy"/"js" (Lucy, JavaScript), "lmo" (the JavaScript LMO
+  // verification engine), or automatic — the fastest available.  The test
+  // suite requires all of them to agree digit for digit.
   function primeCountAuto(x, onProgress, opts) {
     var eng = opts && opts.engine;
     if (eng === "lmo") return primeCountLMO(x, onProgress, opts);
     if (eng === "lucy" || eng === "js") return primeCount(x, onProgress);
-    if (eng === "wasm" || x >= 1e7) {
-      var v = primeCountWasm(x, onProgress);
-      if (v !== null) return v;
-      if (eng === "wasm") throw new Error("WebAssembly engine unavailable in this environment");
+    if (eng === "dr") {
+      var d = primeCountDR(x, onProgress, opts);
+      if (d === null) throw new Error("Deléglise–Rivat engine unavailable for this x in this environment");
+      return d;
     }
-    return primeCount(x, onProgress);
+    if (eng === "wasm") {
+      var v = primeCountWasm(x, onProgress);
+      if (v === null) throw new Error("WebAssembly engine unavailable in this environment");
+      return v;
+    }
+    return bestCount(x, onProgress).value;
   }
 
   function primeCount(N, onProgress) {
@@ -830,15 +887,9 @@
     var onProgress = opts && opts.onProgress;
     var cb = onProgress ? function (f) { onProgress("count", f); } : null;
     var t0 = nowMs();
-    var value = null;
-    var engine = "Lucy_Hedgehog/JS";
-    if (x >= 1e7 && getWasmModule()) {
-      value = primeCountWasm(x, cb);
-      if (value !== null) engine = "compiled C/WebAssembly";
-    }
-    if (value === null) value = primeCount(x, cb);
+    var best = bestCount(x, cb);
     if (onProgress) onProgress("done", 1);
-    return { x: x, value: value, engine: engine, ms: round1(nowMs() - t0) };
+    return { x: x, value: best.value, engine: best.engine, ms: round1(nowMs() - t0) };
   }
 
   // ------------------------------------------------------------------
@@ -862,15 +913,10 @@
     var x0 = guessNthPrime(n);
     var tCount = nowMs();
     var cb = onProgress ? function (f) { onProgress("count", f); } : null;
-    var c0 = null;
-    var engineName = "Lucy_Hedgehog/JS";
-    if (x0 >= 1e7 && getWasmModule()) {
-      c0 = primeCountWasm(x0, cb);
-      if (c0 !== null) engineName = "compiled C/WebAssembly";
-    }
-    if (c0 === null) c0 = primeCount(x0, cb);
+    var best = bestCount(x0, cb);
+    var c0 = best.value;
     return nthPrimeFromCount(n, x0, c0, {
-      engine: engineName,
+      engine: best.engine,
       msEstimate: round1(tCount - tEst),
       msCount: round1(nowMs() - tCount),
       onProgress: onProgress
@@ -964,7 +1010,7 @@
     return withNeighbors({
       n: n,
       value: value,
-      method: "R-inverse estimate + Lucy_Hedgehog exact count [" + (opts.engine || "external counter") + "] + segmented sieve walk",
+      method: "R-inverse estimate + exact count [" + (opts.engine || "external counter") + "] + segmented sieve walk",
       guess: x0,
       piAtGuess: c0,
       offBy: n - c0, // primes between guess and answer (sign = direction)
@@ -1053,7 +1099,13 @@
     primeCount: primeCount,
     primeCountLMO: primeCountLMO,
     primeCountWasm: primeCountWasm,
+    primeCountDR: primeCountDR,
+    drAlpha: drAlpha,
+    DR_MIN_X: DR_MIN_X,
     primeCountAuto: primeCountAuto,
+    phiLMO: phiLMO,
+    p2Count: p2Count,
+    lowerBoundPrime: lowerBoundPrime,
     wasmAvailable: function () { return !!getWasmModule(); },
     icbrt: icbrt,
     riemannR: riemannR,

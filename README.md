@@ -3,9 +3,12 @@
 [![CI](https://github.com/sergiopkass0109-netizen/shiny-guide/actions/workflows/ci.yml/badge.svg)](https://github.com/sergiopkass0109-netizen/shiny-guide/actions/workflows/ci.yml)
 
 Type a number **n** into the box, get back the **n-th prime number** — exactly,
-for any **1 ≤ n ≤ 2×10¹⁴**. Counts on **every CPU core**, runs as an
-**installable offline app**, and every answer is verified by **three independent
-engines** plus an on-the-spot primality proof. Zero dependencies.
+for any **1 ≤ n ≤ 2×10¹⁴**. Counts with the **Deléglise–Rivat algorithm** — the
+research-grade method behind every π(x) record, compiled from C to
+WebAssembly, in O(√x) memory — runs as an **installable offline app**, and every
+answer is checked by **four independent engines** plus an on-the-spot
+primality proof, with a one-click cross-check by a second algorithm on every
+core. Zero dependencies.
 
 ```
 p(10⁶)    =             15,485,863       ~12 ms
@@ -21,6 +24,13 @@ In-browser times are similar on a desktop machine. Version 2.5 made the
 count 3.5× faster than 2.4 by cache-blocking the compiled engine; see Count.)*
 
 ## Multi-core: every CPU core, provably exact
+
+Since 2.8 the multi-core Lucy_Hedgehog engine is the **run-time cross-check**
+(the *cross-check* button under a result recounts π at the guess on every
+core with this second algorithm and compares) and the counting engine on
+machines with 12+ threads; the single-thread Deléglise–Rivat engine is faster
+than it on up to ~8 threads at every size we measured. How it stays exact
+across threads is unchanged:
 
 Most of the work is the **block sweep** described under *Count* below, and
 it has no data hazards at all: the threads simply claim 4096-entry chunks of
@@ -197,15 +207,52 @@ The guess is clamped into the **rigorous bracket**
 n(ln n + ln ln n − 1) ≤ p(n) < n(ln n + ln ln n) (Dusart / Rosser), so a wild
 estimate can never produce a wrong answer — only a slower one.
 
-### 2. Count — exact π at the guess, on three engines
+### 2. Count — exact π at the guess, on four engines
 
-**Speed engine — Lucy_Hedgehog's algorithm compiled from C to WebAssembly**
+**Speed engine (2.8) — Deléglise–Rivat, compiled from C to WebAssembly.**
+This is the algorithm family (Lagarias–Miller–Odlyzko → Deléglise–Rivat →
+Gourdon) behind primecount and every π(x) record: O(x^⅔/log²x) time and
+O(√x) memory, against O(x^¾) time and O(√x) *tables* for the Lucy engine
+below. With y = α·∛x and a = π(y),
+
+    π(x) = S₀ + S_special + a − 1 − P₂(x, a)
+
+* **S₀** (ordinary leaves): Σ μ(n)·φ(x/n, 6) over n ≤ y with lpf(n) > 13,
+  φ from the 30030-wheel table — O(y).
+* **S_special**: every leaf (n, p_b) with n ≤ y < n·p_b, p_b < lpf(n)
+  contributes −μ(n)·φ(⌊x/(n p_b)⌋, b−1). Deléglise–Rivat's split by the
+  value v = ⌊x/(n p_b)⌋: **trivial** (v < p_b, φ = 1) counted in closed form
+  from the π table; **easy** (v < p_b², φ = π(v) − b + 2) answered by one
+  lookup in a fully sieved segment; **hard** (the rest) answered from the
+  partial sieve state just before p_b is crossed off.
+* **P₂**: Σ over y < p ≤ √x of π(x/p) − π(p) + 1, read from the same
+  segments as x/p sweeps through them.
+
+One segmented bit sieve over [1, x/y] (2²⁰ numbers per segment, in L2)
+serves all three: the primes ≤ 13 come pre-removed by 64-bit wheel masks,
+the primes 17…149 are crossed off word-wise with residue masks and a
+popcount, larger primes multiple by multiple; per-block counters walked
+monotonically answer each prime's hard leaves in amortised O(1); a prefix
+popcount after the last prime answers the easy leaves and P₂ in O(1). The
+whole thing is ~300 lines of C (`engine.c`), verified digit for digit against
+the unchanged Lucy tables on hundreds of values and several α, and, at the
+component level, against the JavaScript LMO engine (same φ(x, a) and P₂ for
+the same y). α ≈ 8 is the measured optimum from 10¹¹ on (12 above 10¹⁴):
+larger α shortens the sieve but multiplies the easy leaves.
+
+Memory is the other half of the story: at x = 3×10¹³ the Lucy tables take
+66 MB and at 9×10¹⁵ over 1 GB; Deléglise–Rivat uses a few MB — a prime
+list up to √x, three tables up to y and one 128 KB segment — so the top of
+the range no longer needs a desktop's worth of RAM.
+
+**Second engine — Lucy_Hedgehog's algorithm compiled from C to WebAssembly**
 (O(x^¾) time, O(√x) space): a dynamic programme over the ≤ 2√x distinct
 values of ⌊x/k⌋ with the recurrence `S(v) ← S(v) − [S(⌊v/p⌋) − π(p−1)]`.
-The C core (`engine.c`, zero libc) ships as ~5 KB wasm modules embedded
-base64 in the page. Version 2.5 made it **3.5× faster** than 2.4 at 10¹³ and
-above, by profiling the compiled code loop by loop and changing only *how*
-the same recurrence is evaluated:
+It is the multi-core engine (below) and the run-time cross-check; the same
+C core (`engine.c`, zero libc) ships as ~15 KB wasm modules embedded base64
+in the page. Version 2.5 made it **3.5× faster** than 2.4 at 10¹³ and above,
+by profiling the compiled code loop by loop and changing only *how* the
+same recurrence is evaluated:
 
 * **Runs, walked by quotient.** For i > √(x/p) consecutive i share one
   quotient q = ⌊x/(ip)⌋, and the run of q is exactly
@@ -267,21 +314,21 @@ the test suite. An older lesson still applies: this algorithm is bound by
 64-bit division, and the exact trick in both languages is pipelined *double*
 division with a proof of exactness below 2⁵³.
 
-**Reference engine — the same algorithm in pure JavaScript**, used as the
-automatic fallback wherever WebAssembly is unavailable, and as engine #2 in
-verification.
+**Reference engine — Lucy_Hedgehog in pure JavaScript**, the automatic
+fallback wherever WebAssembly is unavailable, and the oracle every compiled
+engine is tested against.
 
-**Verification engine #3 — Lagarias–Miller–Odlyzko (1985)**, the algorithm family
-behind every prime-counting world record: π(x) = φ(x,a) + a − 1 − P₂(x,a),
-with φ split into *ordinary leaves* (Möbius-weighted wheel counts) and
-*special leaves* (answered by a segmented sieve with a Fenwick tree), and P₂
-folded into one ascending segmented sweep. To our knowledge this is the
-**first complete LMO implementation that runs inside a web page**.
+**Verification engine — Lagarias–Miller–Odlyzko (1985) in JavaScript**:
+π(x) = φ(x,a) + a − 1 − P₂(x,a), φ split into ordinary and special leaves,
+the special leaves answered by a segmented sieve with a Fenwick tree, P₂ in
+one ascending sweep. It was the first complete LMO implementation to run
+inside a web page, and it is the component-level reference for the compiled
+Deléglise–Rivat engine: the suite requires the same φ(x, a) and P₂ from both
+for the same y.
 
-Measured head-to-head, Lucy's constants beat LMO(α=1) ~2× at every size
-below ~10¹⁷ — so Lucy computes your answer and LMO's job is *proof*: an
-unrelated algorithm with an unrelated bug surface, agreeing digit-for-digit.
-Run all three: `node cli.js --pi 1e12 --engine all`.
+Four engines, two algorithm families, two languages: Deléglise–Rivat
+computes your answer, and any of the others will tell you if it is wrong.
+Run them all: `node cli.js --pi 1e12 --engine all`.
 
 ### 3. Walk — segmented sieve over the tiny gap
 
@@ -302,10 +349,12 @@ Milliseconds.
 6. |R(x) − π(x)| ≪ √x (guards the Gram series / ζ implementation);
 7. estimates always inside the rigorous Rosser/Dusart bracket;
 8. input-validation edge cases;
-9. **triple-engine agreement** (compiled wasm vs JS Lucy vs LMO) on
-   structured + random x and several α values — the flagship check — plus
-   75 values chosen to cross the compiled engine's block-start threshold,
-   segment boundaries and corrected prefix reads;
+9. **four-engine agreement** (compiled Deléglise–Rivat vs compiled Lucy vs
+   JS Lucy vs JS LMO) on structured + random x and several α values — the
+   flagship check — plus 75 values chosen to cross the compiled Lucy engine's
+   block-start threshold, segment boundaries and corrected prefix reads, and
+   the Deléglise–Rivat components (φ(x,a), P₂, a) matched against the JS LMO
+   engine for the same y;
 10. the deterministic polynomial-time primality test vs trial division,
     Carmichael numbers, Mersenne primes and the project's own verified primes;
 11. `countPrimes` (the page's π(x) mode) and the neighbouring-prime
@@ -373,9 +422,9 @@ npm run bench       # timing table; --big / --huge tiers
 | `index.html` | the page — **generated**, fully self-contained |
 | `index.template.html` | page source template |
 | `style.css` | styling (inlined at build) |
-| `nthprime.js` | both engines + estimate + walk (inlined at build; Node-ready) |
+| `nthprime.js` | engine selection, the JS engines, estimate + walk (inlined at build; Node-ready) |
 | `build.js` | `npm run build` regenerates index.html |
-| `engine.c` | the C core — cache-blocked Lucy counting for wasm32 |
+| `engine.c` | the C core — Deléglise–Rivat counting and cache-blocked Lucy counting for wasm32 |
 | `wasmbuild.js` | `npm run build:wasm` — clang → four .wasm builds → engine-wasm.js |
 | `engine-wasm.js` | **generated** base64-embedded wasm loader with SIMD detection (committed so clang isn't required) |
 | `engine.wasm` / `engine_simd.wasm` | the single-thread core, baseline and SIMD builds |

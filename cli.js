@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /* Command-line interface:
- *   node cli.js <n> [--json] [--threads K]          n-th prime, 1 ≤ n ≤ 2×10^14 (multi-core when K ≠ 1)
- *   node cli.js --pi <x> [--engine lucy|lmo|wasm|parallel|all]   exact π(x)
+ *   node cli.js <n> [--json] [--threads K]          n-th prime, 1 ≤ n ≤ 2×10^14
+ *                                                   (Deléglise–Rivat; --threads K ≥ 2 = multi-core Lucy)
+ *   node cli.js --pi <x> [--engine dr|lucy|lmo|wasm|parallel|all]   exact π(x)
  * Numbers accept 1234567, 1,234,567, 1_000_000, 1e9 and 10^12 forms. */
 "use strict";
 
@@ -25,7 +26,7 @@ var args = process.argv.slice(2);
 var json = args.indexOf("--json") !== -1;
 var piMode = args.indexOf("--pi") !== -1;
 var engIdx = args.indexOf("--engine");
-var engine = engIdx !== -1 ? (args[engIdx + 1] || "lucy") : "lucy";
+var engine = engIdx !== -1 ? (args[engIdx + 1] || "auto") : "auto";
 var thrIdx = args.indexOf("--threads");
 var threads = thrIdx !== -1 ? Number(args[thrIdx + 1]) || 0 : 0;
 var positional = args.filter(function (a, i) {
@@ -35,13 +36,15 @@ var positional = args.filter(function (a, i) {
 var nArg = positional[0];
 
 if (nArg === undefined) {
-  console.error("usage: node cli.js <n> [--json] [--threads K]                        the n-th prime");
-  console.error("       node cli.js --pi <x> [--engine lucy|lmo|wasm|parallel|all]   exact pi(x)");
+  console.error("usage: node cli.js <n> [--json] [--threads K]                           the n-th prime");
+  console.error("       node cli.js --pi <x> [--engine dr|lucy|lmo|wasm|parallel|all]   exact pi(x)");
   process.exit(2);
 }
 
 var fmt = function (v) { return Number(v).toLocaleString("en-US"); };
-var parallelOK = PAR && PAR.available() && threads !== 1;
+// multi-core Lucy is opt-in (--threads K ≥ 2) or part of --engine all; the
+// default is the single-thread Deléglise–Rivat engine, which is faster
+var parallelOK = PAR && PAR.available() && (threads >= 2 || engine === "all" || engine === "parallel");
 var K = parallelOK ? (threads || PAR.threads()) : 1;
 
 if (piMode) {
@@ -66,6 +69,12 @@ if (piMode) {
       var vc = NP.primeCountWasm(x);
       console.log("pi(" + fmt(x) + ") = " + fmt(vc) + "  [wasm " + (Date.now() - t0) + " ms]");
       allAgree = allAgree && vc === va;
+      t0 = Date.now();
+      var vdr = NP.primeCountDR(x);
+      if (vdr !== null) {
+        console.log("pi(" + fmt(x) + ") = " + fmt(vdr) + "  [dr   " + (Date.now() - t0) + " ms]");
+        allAgree = allAgree && vdr === va;
+      }
     }
     if (engine === "all" && parallelOK) {
       chain = chain.then(function () {
@@ -86,10 +95,13 @@ if (piMode) {
       console.log("pi(" + fmt(x) + ") = " + fmt(v) + "  [parallel ×" + K + " " + (Date.now() - t0) + " ms]");
     }, function (e) { console.error("error: " + e.message); process.exit(1); });
   } else {
-    var val = engine === "lmo" ? NP.primeCountLMO(x)
-            : engine === "wasm" ? NP.primeCountWasm(x)
-            : NP.primeCount(x);
-    console.log("pi(" + fmt(x) + ") = " + fmt(val) + "  [" + engine + " " + (Date.now() - t0) + " ms]");
+    var val, used = engine;
+    if (engine === "lmo") val = NP.primeCountLMO(x);
+    else if (engine === "wasm") val = NP.primeCountWasm(x);
+    else if (engine === "lucy") val = NP.primeCount(x);
+    else if (engine === "dr") val = NP.primeCountAuto(x, null, { engine: "dr" });
+    else { var auto = NP.countPrimes(x); val = auto.value; used = auto.engine; }
+    console.log("pi(" + fmt(x) + ") = " + fmt(val) + "  [" + used + " " + (Date.now() - t0) + " ms]");
   }
 } else {
   var n = parseN(nArg);

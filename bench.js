@@ -34,28 +34,28 @@ ns.forEach(function (n) {
 });
 console.log("\n(exponent < 1.00 = sublinear: doubling n less than doubles the time)");
 
-// ---- multi-core comparison on the largest tier that fits a coffee break
+// ---- engine comparison on the largest tier that fits a coffee break:
+// the compiled Deléglise–Rivat engine (single thread, the default) against
+// the compiled Lucy_Hedgehog tables, single-thread and on every core
 var PAR = null;
 try { PAR = require("./parallel.js"); } catch (e) { PAR = null; }
+var xCmp = ns.indexOf(1e12) !== -1 ? 3e13 : 3e11;
+console.log("\nexact π(" + xCmp.toExponential(0).replace("+", "") + ") by engine:");
+var tDR = Date.now(); var vDR = NP.primeCountDR(xCmp); tDR = Date.now() - tDR;
+console.log("  Deléglise–Rivat (compiled, 1 thread) : " + (tDR / 1000).toFixed(2) + " s");
+if (NP.wasmAvailable()) {
+  var tL = Date.now(); var vL = NP.primeCountWasm(xCmp); tL = Date.now() - tL;
+  console.log("  Lucy_Hedgehog   (compiled, 1 thread) : " + (tL / 1000).toFixed(2) + " s  " + (vL === vDR ? "same answer ✓" : "*** MISMATCH ***"));
+}
 if (PAR && PAR.available() && PAR.threads() >= 2) {
   var K = PAR.threads();
-  var nPar = ns.indexOf(1e12) !== -1 ? 1e12 : 1e10;
-  var t1 = Date.now();
-  var single = NP.nthPrime(nPar);
-  var tSingle = Date.now() - t1;
   var t2 = Date.now();
-  NP.nthPrimeAsync(nPar, {
-    engineLabel: "multi-core ×" + K,
-    parallelMinX: 1e9,
-    countAsync: function (x0, cb) { return PAR.primeCountParallel(x0, { threads: K, onProgress: cb }); }
-  }).then(function (par) {
-    var tPar = Date.now() - t2;
-    console.log("\nmulti-core: p(10^" + Math.round(Math.log10(nPar)) + ") single-thread " +
-      (tSingle / 1000).toFixed(1) + " s → " + K + " threads " + (tPar / 1000).toFixed(1) + " s  (" +
-      (tSingle / tPar).toFixed(2) + "× faster, " + (par.value === single.value ? "identical answer ✓" : "*** MISMATCH ***") + ")");
+  PAR.primeCountParallel(xCmp, { threads: K }).then(function (vP) {
+    var tP = Date.now() - t2;
+    console.log("  Lucy_Hedgehog   (" + K + " threads)          : " + (tP / 1000).toFixed(2) + " s  " + (vP === vDR ? "same answer ✓" : "*** MISMATCH ***"));
   });
 } else {
-  console.log("\n(multi-core engine unavailable in this environment)");
+  console.log("  (multi-core engine unavailable in this environment)");
 }
 
 function pad(s, w) {

@@ -36,6 +36,8 @@
 typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
+typedef uint8_t u8;
+typedef int8_t i8;
 
 /* Wheel start: the tables begin at the state after the passes for 2, 3, 5,
  * 7, 11 and 13 instead of running those six full passes.  Lucy's invariant
@@ -267,4 +269,318 @@ u64 pi_lucy(u64 x, u32 smallOff, u32 largeOff, u32 scratchOff, u32 tblOff) {
     p = P[k - 1] + 1;
   }
   return large[1];
+}
+
+/* ======================================================================
+ * Deléglise–Rivat prime counting (the Lagarias–Miller–Odlyzko family):
+ * O(x^(2/3) / log^2 x) time, O(sqrt(x)) memory.  Exact.
+ *
+ *   pi(x) = S0 + S_special + a - 1 - P2(x, a),   y = alpha * cbrt(x), a = pi(y)
+ *   S0        = sum_{n <= y, n = 1 or (mu(n) != 0, lpf(n) > 13)} mu(n) phi6(x/n)
+ *   S_special = sum over leaves (n, b): n <= y < n p_b, mu(n) != 0, 13 < p_b < lpf(n),
+ *               b <= a, of  -mu(n) * phi(floor(x / (n p_b)), b - 1)
+ *   P2        = sum_{y < p <= sqrt(x)} (pi(x/p) - pi(p) + 1)
+ *
+ * Special leaves split by v = floor(x / (n p_b)):
+ *   v <  p_b    trivial   phi = 1                    (closed form; p_b > sqrt(y) => n prime)
+ *   v <  p_b^2  easy      phi = pi(v) - b + 2         (pi from the fully sieved segment)
+ *   otherwise   hard      phi = count of numbers <= v unsieved by p_1..p_{b-1}
+ * For p_b <= sqrt(y) every leaf is answered from the sieve state (exact for any v).
+ *
+ * One segmented bit sieve over [1, z], z = x/y: within a segment the primes are
+ * crossed off in order (the primes <= 149 word-wise through residue masks) and
+ * each prime's hard leaves are answered just before it is crossed off, from
+ * per-block popcount counters walked monotonically; once the segment is fully
+ * sieved by the primes <= sqrt(z), its unsieved numbers are 1 and the primes
+ * above sqrt(z), which answers the easy leaves and P2 in O(1) each.
+ *
+ * Memory is carved from `base`: dr_bytes(x, y) tells the host how much.  The
+ * host picks y (see drAlpha in nthprime.js); 17 <= y < sqrt(x) and a >= 8 are
+ * required, otherwise the call returns ~0 and the host uses the Lucy engine.
+ * Verified digit-for-digit against the Lucy engine (see test/test.js).
+ * ====================================================================== */
+#define DRS (1u << 20)              /* numbers per segment */
+#define DRW (DRS / 64)              /* words per segment */
+#define DRNB (DRW / 64)             /* big blocks (4096 numbers) per segment */
+#define P_C 13                      /* wheel primes 2,3,5,7,11,13: c = 6 */
+#define PMASK 149                   /* primes 17..PMASK are crossed off word-wise with residue masks */
+
+static inline u64 umin(u64 a, u64 b) { return a < b ? a : b; }
+static inline u64 umax(u64 a, u64 b) { return a > b ? a : b; }
+static inline u64 align8(u64 v) { return (v + 7) & ~(u64)7; }
+
+static u64 G[8];                                        /* components of the last call (dr_part), for the test suite */
+__attribute__((export_name("dr_part"))) u64 dr_part(u32 k) { return G[k]; }
+
+/* upper bound on pi(n) for the memory budget: 1.26 n / ln n + 64 (n >= 17) */
+static u64 pi_bound(u64 n) {
+  if (n < 17) return 80;
+  u64 lg2 = 63 - (u64)__builtin_clzll(n);              /* floor(log2 n) <= log2 n, so this only over-allocates */
+  double ln = 0.6931471805599453 * (double)lg2;
+  return (u64)(1.26 * (double)n / ln) + 64;
+}
+
+/* bytes needed by pi_dr for (x, y); the host grows memory to this */
+__attribute__((export_name("dr_bytes")))
+u64 dr_bytes(u64 x, u64 y) {
+  u64 r = isqrt64(x);
+  u64 nb = pi_bound(r);
+  u64 bytes = 0;
+  bytes += align8(4 * (nb + 2));           /* prime list */
+  bytes += align8(8 * (r / 64 + 3));       /* prime bit sieve up to r */
+  bytes += align8(y + 2);                  /* mu */
+  bytes += align8(4 * (y + 2));            /* lpf */
+  bytes += align8(4 * (y + 2));            /* pi */
+  bytes += align8(2 * WHEEL);              /* wheel table */
+  bytes += align8(8 * 64);                 /* wheel masks */
+  bytes += align8(8 * 4096);               /* residue masks for the primes 17..PMASK (sum of p = 2235) */
+  bytes += align8(8 * 64);                 /* mask offsets per prime index */
+  bytes += align8(8 * DRW);                /* sieve words */
+  bytes += align8(2 * DRNB);               /* cbig */
+  bytes += align8(4 * (DRW + 1));          /* cum */
+  u64 a = pi_bound(y);
+  bytes += align8(8 * (a + 2)) * 4;        /* cnt, nxt, nS, qIdx */
+  return bytes + 4096;
+}
+
+/* Running count of unsieved numbers at offsets 0..pos of the segment, for a
+ * monotone sequence of pos (the leaves of one prime arrive in increasing
+ * order): the sum of whole big blocks (cbig, maintained during cross-off)
+ * plus popcounts of the words of the current block scanned once. */
+typedef struct { u64 B, sb, w, sw; } RunCount;
+static inline void rc_init(RunCount *rc) { rc->B = 0; rc->sb = 0; rc->w = 0; rc->sw = 0; }
+static inline u64 rc_count(RunCount *rc, const u64 *sv, const u16 *cbig, u64 pos) {
+  u64 nB = pos >> 12, nw = pos >> 6;
+  if (nB != rc->B) { while (rc->B < nB) rc->sb += cbig[rc->B++]; rc->w = nB << 6; rc->sw = 0; }
+  while (rc->w < nw) rc->sw += (u64)__builtin_popcountll(sv[rc->w++]);
+  u64 sh = pos & 63;
+  u64 mask = sh == 63 ? ~(u64)0 : (((u64)1 << (sh + 1)) - 1);
+  return rc->sb + rc->sw + (u64)__builtin_popcountll(sv[nw] & mask);
+}
+
+__attribute__((export_name("pi_dr")))
+u64 pi_dr(u64 x, u64 y, u32 base) {
+  if (x < 2) return 0;
+  u64 r = isqrt64(x);
+  if (y < 17 || y >= r) return ~(u64)0;                /* caller keeps 17 <= y < sqrt(x) */
+  u64 z = fdiv(x, y);
+  u64 off = base;
+  u64 nb = pi_bound(r);
+  u32 *PR = (u32 *)(uintptr_t)off; off += align8(4 * (nb + 2));
+  u64 *PS = (u64 *)(uintptr_t)off; off += align8(8 * (r / 64 + 3));
+  i8  *mu = (i8 *)(uintptr_t)off;  off += align8(y + 2);
+  u32 *lpf = (u32 *)(uintptr_t)off; off += align8(4 * (y + 2));
+  u32 *pi = (u32 *)(uintptr_t)off;  off += align8(4 * (y + 2));
+  u16 *T = (u16 *)(uintptr_t)off;   off += align8(2 * WHEEL);
+  u64 *MSK = (u64 *)(uintptr_t)off; off += align8(8 * 64);
+  u64 *PMK = (u64 *)(uintptr_t)off; off += align8(8 * 4096);
+  u64 *PMO = (u64 *)(uintptr_t)off; off += align8(8 * 64);
+  u64 *sv = (u64 *)(uintptr_t)off;  off += align8(8 * DRW);
+  u16 *cbig = (u16 *)(uintptr_t)off; off += align8(2 * DRNB);
+  u32 *cum = (u32 *)(uintptr_t)off; off += align8(4 * (DRW + 1));
+  u64 abound = pi_bound(y);
+  u64 *cnt = (u64 *)(uintptr_t)off; off += align8(8 * (abound + 2));
+  u64 *nxt = (u64 *)(uintptr_t)off; off += align8(8 * (abound + 2));
+  u64 *nS = (u64 *)(uintptr_t)off;  off += align8(8 * (abound + 2));
+  u64 *qIdx = (u64 *)(uintptr_t)off; off += align8(8 * (abound + 2));
+
+  /* ---- primes up to r (bit sieve, 1 bit per number) ---- */
+  u64 nw = r / 64 + 2;
+  for (u64 w = 0; w < nw; w++) PS[w] = ~(u64)0;
+  PS[0] &= ~(u64)3;                                     /* 0 and 1 */
+  for (u64 i = 2; i * i <= r; i++)
+    if ((PS[i >> 6] >> (i & 63)) & 1)
+      for (u64 m = i * i; m <= r; m += i) PS[m >> 6] &= ~((u64)1 << (m & 63));
+  u64 nP = 0;
+  for (u64 i = 2; i <= r; i++) if ((PS[i >> 6] >> (i & 63)) & 1) { if (nP >= nb) return ~(u64)0; PR[nP++] = (u32)i; }
+
+  /* ---- mu, lpf, pi up to y ---- */
+  for (u64 n = 0; n <= y; n++) { mu[n] = 1; lpf[n] = 0; }
+  for (u64 k = 0; k < nP && PR[k] <= y; k++) {
+    u64 p = PR[k];
+    for (u64 m = p; m <= y; m += p) { mu[m] = (i8)-mu[m]; if (lpf[m] == 0) lpf[m] = (u32)p; }
+    for (u64 m = p * p; m <= y; m += p * p) mu[m] = 0;
+  }
+  pi[0] = 0;
+  for (u64 n = 1; n <= y; n++) pi[n] = pi[n - 1] + (n >= 2 && lpf[n] == n);
+  u64 a = pi[y];                                        /* 1-based count: p_a = largest prime <= y */
+  if (a < 8) return ~(u64)0;                            /* need p_a > 13 */
+
+  wheel_table(T);                                       /* T[m] = #{1 <= t <= m : gcd(t, 30030) = 1} */
+  #define PHI6(v) (((v) / WHEEL) * (u64)WHEEL_PHI + T[(v) % WHEEL])
+
+  /* ---- S0: ordinary leaves ---- */
+  u64 S0 = 0;                                           /* modular u64: exact at the end */
+  for (u64 n = 1; n <= y; n++) {
+    if (n == 1) { S0 += PHI6(x); continue; }
+    if (mu[n] == 0 || lpf[n] <= P_C) continue;
+    u64 v = PHI6(fdiv(x, n));
+    if (mu[n] > 0) S0 += v; else S0 -= v;
+  }
+
+  /* ---- index bounds ---- */
+  u64 sqy = isqrt64(y);
+  u64 bSmall = pi[sqy];                                 /* leaves of b <= bSmall: any n, via the sieve */
+  if (bSmall < 6) bSmall = 6;                           /* special leaves start at b = 7 (p_7 = 17 > 13) */
+  u64 x14 = isqrt64(r);                                 /* floor(x^(1/4)) */
+  u64 bHard = umax(bSmall, pi[umin(x14, y)]);           /* hard leaves exist only for b <= bHard */
+  u64 sqz = isqrt64(z);
+  u64 aS = pi[umin(sqz, y)];                            /* primes crossed off in the segment sieve */
+  if (aS < bHard) aS = bHard;
+
+  /* ---- trivial leaves, closed form, for p_b > sqrt(y) ---- */
+  u64 Striv = 0;
+  for (u64 b = bSmall + 1; b <= a; b++) {
+    u64 p = PR[b - 1];
+    u64 lo = umax(umax(p, fdiv(y, p)), fdiv(fdiv(x, p), p));   /* q > lo */
+    if (lo < y) Striv += pi[y] - pi[lo];
+  }
+
+  /* ---- masks for the wheel primes 3..13 (per residue of the word's first number) ---- */
+  { static const u64 wp[5] = {3, 5, 7, 11, 13}; u64 o = 0;
+    for (u64 k = 0; k < 5; k++) { u64 p = wp[k];
+      for (u64 res = 0; res < p; res++) { u64 m = 0; for (u64 j = 0; j < 64; j++) if ((res + j) % p == 0) m |= (u64)1 << j; MSK[o + res] = m; }
+      o += p; } }
+  #define EVEN 0xAAAAAAAAAAAAAAAAull                    /* lo is odd: even numbers sit at odd offsets */
+  /* residue masks for the primes 17..PMASK: PMK[PMO[b] + res] has the bits of the
+   * multiples of p_b in a word whose first number is res (mod p_b) */
+  u64 bMask = 6;
+  { u64 o = 0;
+    for (u64 b = 7; b <= aS && PR[b - 1] <= PMASK; b++) { u64 p = PR[b - 1]; PMO[b] = o;
+      for (u64 res = 0; res < p; res++) { u64 m = 0; for (u64 j = 0; j < 64; j++) if ((res + j) % p == 0) m |= (u64)1 << j; PMK[o + res] = m; }
+      o += p; bMask = b; } }
+
+  /* ---- cursors ---- */
+  for (u64 b = 0; b <= aS + 1; b++) { cnt[b] = 0; nxt[b] = 0; nS[b] = 0; qIdx[b] = 0; }
+  for (u64 b = 7; b <= aS; b++) nxt[b] = PR[b - 1];      /* first multiple to cross off: p itself */
+  for (u64 b = 7; b <= bSmall; b++) nS[b] = y;           /* small b: n descends from y */
+  for (u64 b = bSmall + 1; b <= bHard; b++) {            /* large b: q descends from min(y, x/p^3) */
+    u64 p = PR[b - 1];
+    u64 qmax = umin(y, fdiv(fdiv(fdiv(x, p), p), p));
+    qIdx[b] = qmax >= 2 ? pi[qmax] : 0;                  /* 1-based index of the largest prime <= qmax; 0 = none */
+  }
+  u64 p2Idx = nP;                                        /* P2 cursor: primes descending from the largest <= r (1-based index) */
+  u64 Shard = 0, Seasy = 0, P2 = 0;
+  u64 belowAll = 0;                                      /* unsieved numbers (fully sieved state) below the segment */
+  u64 nseg = (z - 1) / DRS + 1;
+
+  for (u64 seg = 0; seg < nseg; seg++) {
+    u64 lo = 1 + seg * DRS;
+    u64 hi = umin(lo + DRS - 1, z);
+    u64 len = hi - lo + 1;
+    if ((seg & 15) == 0) host_progress(seg, nseg);
+    /* wheel state: multiples of 2..13 removed, 1 kept */
+    { u64 r3 = lo % 3, r5 = lo % 5, r7 = lo % 7, r11 = lo % 11, r13 = lo % 13;
+      for (u64 w = 0; w < DRW; w++) {
+        u64 m = EVEN | MSK[r3] | MSK[3 + r5] | MSK[8 + r7] | MSK[15 + r11] | MSK[26 + r13];
+        sv[w] = ~m;
+        r3 = (r3 + 64) % 3; r5 = (r5 + 64) % 5; r7 = (r7 + 64) % 7; r11 = (r11 + 64) % 11; r13 = (r13 + 64) % 13;
+      }
+      if (len < DRS) {                                   /* clear offsets >= len */
+        u64 fw = len >> 6, fb = len & 63;
+        if (fb) sv[fw] &= ((u64)1 << fb) - 1, fw++;
+        for (u64 w = fw; w < DRW; w++) sv[w] = 0;
+      } }
+    u64 curUnm = 0;
+    for (u64 B = 0; B < DRNB; B++) { u64 s = 0; for (u64 t = 0; t < 64; t++) s += (u64)__builtin_popcountll(sv[(B << 6) + t]); cbig[B] = (u16)s; curUnm += s; }
+
+    for (u64 b = 7; b <= aS; b++) {
+      u64 p = PR[b - 1];
+      if (b <= bHard) {
+        /* hard leaves of b: state b-1 = cnt[b-1] (below lo) + count in segment */
+        RunCount rc; rc_init(&rc);
+        if (b <= bSmall) {
+          u64 n = nS[b], nmin = fdiv(y, p);              /* leaves need n > y/p */
+          while (n > nmin) {
+            u64 v = fdiv(x, n * p);
+            if (v > hi) break;
+            if (mu[n] != 0 && lpf[n] > p) {
+              u64 phi = cnt[b - 1] + rc_count(&rc, sv, cbig, v - lo);
+              if (mu[n] > 0) Shard -= phi; else Shard += phi;
+            }
+            n--;
+          }
+          nS[b] = n;
+        } else {
+          u64 qi = qIdx[b], qmin = umax(p, fdiv(y, p));   /* leaves need q > qmin */
+          while (qi >= 1 && PR[qi - 1] > qmin) {
+            u64 q = PR[qi - 1];
+            u64 v = fdiv(x, q * p);
+            if (v > hi) break;
+            Shard += cnt[b - 1] + rc_count(&rc, sv, cbig, v - lo);   /* -mu(q) = +1 */
+            qi--;
+          }
+          qIdx[b] = qi;
+        }
+        cnt[b - 1] += curUnm;
+        if (b <= bMask) {
+          /* cross off p word-wise with residue masks, counted per word */
+          const u64 *M = PMK + PMO[b];
+          u64 res = lo % p, step = 64 % p, wEnd = (len + 63) >> 6;
+          for (u64 w = 0; w < wEnd; w++) {                 /* branchless: every word is processed */
+            u64 old = sv[w], hit = old & M[res];
+            sv[w] = old & ~hit;
+            u64 d = (u64)__builtin_popcountll(hit);
+            cbig[w >> 6] -= (u16)d; curUnm -= d;
+            res += step; res -= p & (0 - (u64)(res >= p));
+          }
+        } else {
+          /* cross off p, counted */
+          u64 m = nxt[b];
+          for (; m <= hi; m += p) {
+            u64 j = m - lo, w = j >> 6, sh = j & 63;
+            u64 old = sv[w], d = (old >> sh) & 1;
+            sv[w] = old & ~((u64)1 << sh);
+            cbig[w >> 6] -= (u16)d; curUnm -= d;
+          }
+          nxt[b] = m;
+        }
+      } else if (b <= bMask) {
+        const u64 *M = PMK + PMO[b];
+        u64 res = lo % p, step = 64 % p, wEnd = (len + 63) >> 6;
+        for (u64 w = 0; w < wEnd; w++) { sv[w] &= ~M[res]; res += step; res -= p & (0 - (u64)(res >= p)); }
+      } else {
+        /* cross off p, plain */
+        u64 m = nxt[b];
+        for (; m <= hi; m += p) { u64 j = m - lo; sv[j >> 6] &= ~((u64)1 << (j & 63)); }
+        nxt[b] = m;
+      }
+    }
+
+    /* fully sieved: cumulative counts; unsieved = 1 (first segment) and primes > p_aS */
+    { u64 s = 0; for (u64 w = 0; w < DRW; w++) { cum[w] = (u32)s; s += (u64)__builtin_popcountll(sv[w]); } cum[DRW] = (u32)s; }
+    #define UNS_LE(pos) (belowAll + cum[(pos) >> 6] + (u64)__builtin_popcountll(sv[(pos) >> 6] & (((pos) & 63) == 63 ? ~(u64)0 : (((u64)1 << (((pos) & 63) + 1)) - 1))))
+    #define PI_AT(v) ((v) <= y ? (u64)pi[(v)] : aS + UNS_LE((v) - lo) - 1)
+
+    /* P2: primes p in (y, r] with x/p in [lo, hi]; p descends as segments ascend */
+    while (p2Idx > a) {
+      u64 p = PR[p2Idx - 1];
+      u64 v = fdiv(x, p);
+      if (v > hi) break;
+      P2 += PI_AT(v) - p2Idx + 1;                        /* pi(x/p) - pi(p) + 1, pi(p) = p2Idx */
+      p2Idx--;
+    }
+
+    /* easy leaves: p_b > sqrt(y), n = q prime, p_b <= v < p_b^2, v in [lo, hi] */
+    for (u64 b = bSmall + 1; b <= a; b++) {
+      u64 p = PR[b - 1];
+      u64 xp = fdiv(x, p), xp2 = fdiv(xp, p), xp3 = fdiv(xp2, p);
+      u64 qlo = umax(umax(p, fdiv(y, p)), xp3) + 1;      /* q > p, q > y/p, q > x/p^3 */
+      u64 qhi = umin(y, xp2);                            /* q <= x/p^2 (else trivial) */
+      /* segment: lo <= floor(xp/q) <= hi  <=>  xp/(hi+1) < q <= xp/lo */
+      u64 sl = fdiv(xp, hi + 1) + 1, sh2 = fdiv(xp, lo);
+      if (sl > qlo) qlo = sl;
+      if (sh2 < qhi) qhi = sh2;
+      if (qlo > qhi) continue;
+      u64 i0 = pi[qlo - 1] + 1, i1 = pi[qhi];             /* 1-based prime indices in [qlo, qhi] */
+      for (u64 i = i0; i <= i1; i++) {
+        u64 v = fdiv(xp, PR[i - 1]);
+        Seasy += PI_AT(v) - b + 2;
+      }
+    }
+    belowAll += cum[DRW];
+  }
+  host_progress(nseg, nseg);
+  G[0] = S0; G[1] = Shard; G[2] = Seasy; G[3] = Striv; G[4] = P2; G[5] = a; G[6] = aS; G[7] = bHard;
+  return S0 + Shard + Seasy + Striv + a - 1 - P2;
 }

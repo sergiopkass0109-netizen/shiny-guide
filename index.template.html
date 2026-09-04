@@ -24,8 +24,8 @@
   <header>
     <h1>The <em>n</em>-th Prime</h1>
     <p class="tagline">
-      Riemann&nbsp;R inverse estimate&nbsp;·&nbsp;Lucy_Hedgehog exact count
-      <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;compiled C/WebAssembly core&nbsp;·&nbsp;triple-engine verified&nbsp;·&nbsp;<span id="version" title="build version (from package.json)">v/*BUILD:VERSION*/</span>
+      Riemann&nbsp;R inverse estimate&nbsp;·&nbsp;Deléglise–Rivat exact count
+      <span class="complexity">O(x<sup>2/3</sup>/log²x)</span>&nbsp;·&nbsp;compiled C/WebAssembly core&nbsp;·&nbsp;four engines cross-checked&nbsp;·&nbsp;<span id="version" title="build version (from package.json)">v/*BUILD:VERSION*/</span>
     </p>
     <p class="status-line"><span id="mc-status"></span><button id="install" class="chip" hidden>install as app</button></p>
   </header>
@@ -222,8 +222,41 @@
         " · next prime " + fmt(res.next) +
         " <span class=\"muted\">(gap " + fmt(res.next - res.value) + ")</span>";
       verifyEl.hidden = false;
+      if (res.guess !== undefined) offerCrossCheck(res.guess, res.piAtGuess);
     }
     setShare("n=" + String(n));
+  }
+
+  // Independent re-count of π at the guess with the multi-core Lucy_Hedgehog
+  // engine (a different algorithm on different code): two exact methods
+  // agreeing at run time is the strongest check this page can offer.
+  function offerCrossCheck(x0, expected) {
+    if (!parallelReady() || x0 < 1e9) return;
+    var btn = document.createElement("button");
+    btn.className = "chip";
+    btn.textContent = "cross-check with the independent multi-core engine";
+    btn.title = "recount π(" + fmt(x0) + ") with Lucy_Hedgehog on " + NthPrimeParallel.threads() + " threads and compare";
+    var line = document.createElement("div");
+    line.appendChild(btn);
+    verifyEl.appendChild(line);
+    var myJob = jobId;
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      btn.textContent = "recounting on " + NthPrimeParallel.threads() + " threads…";
+      var t0 = now();
+      NthPrimeParallel.primeCountParallel(x0).then(function (c) {
+        if (myJob !== jobId) return;
+        var ms = Math.round(now() - t0);
+        line.innerHTML = c === expected
+          ? "<b>✓ independent algorithm agrees:</b> π(" + fmt(x0) + ") = " + fmt(c) +
+            " by Lucy_Hedgehog on " + NthPrimeParallel.threads() + " threads (" + NthPrimeParallel.kernels() + " kernels, " + fmtElapsed(ms) + ")"
+          : "<b>✗ MISMATCH:</b> Lucy_Hedgehog counted " + fmt(c) + " but Deléglise–Rivat counted " + fmt(expected) +
+            " — please report this n (the result above may be wrong)";
+      }).catch(function (e) {
+        if (myJob !== jobId) return;
+        line.textContent = "cross-check unavailable: " + ((e && e.message) || e);
+      });
+    });
   }
 
   function showPiResult(x, res) {
@@ -232,7 +265,7 @@
     answer.textContent = fmt(res.value);
     answerLabel.textContent = "π(" + fmt(x) + ") — the number of primes ≤ " + fmt(x);
     copyBtn.hidden = false;
-    $("s-method").textContent = "exact prime count, Lucy_Hedgehog [" + res.engine + "]";
+    $("s-method").textContent = "exact prime count [" + res.engine + "]";
     $("s-guess").textContent = $("s-pi").textContent = $("s-off").textContent = $("s-walk").textContent = "—";
     $("s-time").textContent = fmtElapsed(res.ms);
     stats.hidden = false;
@@ -385,11 +418,12 @@
 
   // friendly expectation for big jobs (nEq ≈ an n-th-prime-sized workload)
   function sizeNote(nEq) {
-    if (nEq >= 2e13) return " (heads-up: a few minutes and ~1 GB of memory — desktop browser or the Node CLI recommended; cancel any time)";
-    if (nEq >= 2e12) return " (this size takes a minute or two)";
+    if (nEq >= 2e13) return " (heads-up: this size takes minutes — cancel any time)";
+    if (nEq >= 2e12) return " (this size takes half a minute or so)";
     return "";
   }
 
+  var USE_MULTICORE_COUNT = typeof navigator !== "undefined" && (navigator.hardwareConcurrency || 0) >= 12;
   function startJob(op, arg, label) {
     jobId++;
     var id = jobId;
@@ -397,9 +431,13 @@
     clearOutput();
     setBusy(true);
     answerLabel.textContent = label;
-    if (parallelReady()) {
+    // The single-thread Deléglise–Rivat engine (compute worker) beats the
+    // multi-core Lucy_Hedgehog engine on up to ~8 threads at every size, so
+    // it does the counting; the multi-core engine answers the cross-check
+    // button afterwards (and USE_MULTICORE_COUNT keeps the old routing
+    // available for machines with many cores).
+    if (USE_MULTICORE_COUNT && parallelReady()) {
       var x0 = op === "pi" ? arg : NthPrime.guessNthPrime(arg);
-      // measured crossover ≈ 3×10¹¹ on 4 threads; it moves down with more cores
       var minX = Math.max(2e11, 1e12 * 4 / NthPrimeParallel.threads());
       if (x0 >= minX) { runParallel(id, op, arg, x0); return; }
     }
@@ -495,11 +533,11 @@
     var st = $("mc-status");
     var httpish = /^https?:/.test(location.protocol);
     if (parallelReady()) {
-      st.textContent = "multi-core ready · " + NthPrimeParallel.threads() + " threads";
+      st.textContent = "Deléglise–Rivat engine · independent multi-core cross-check ready (" + NthPrimeParallel.threads() + " threads)";
     } else if (httpish && "serviceWorker" in navigator) {
-      st.textContent = "multi-core activates after the app's first load";
+      st.textContent = "Deléglise–Rivat engine · the multi-core cross-check activates after the app's first load";
     } else {
-      st.textContent = "single-thread mode · the hosted app runs multi-core";
+      st.textContent = "Deléglise–Rivat engine · single-thread mode";
     }
     var deferredInstall = null, installBtn = $("install");
     window.addEventListener("beforeinstallprompt", function (e) {

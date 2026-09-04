@@ -318,6 +318,48 @@ section("LMO engine agrees with Lucy_Hedgehog engine (independent algorithms)");
 })();
 
 // ---------------------------------------------------------------- 10
+section("Deléglise–Rivat engine (compiled) agrees with Lucy and LMO");
+(function () {
+  if (!NP.wasmAvailable() || NP.primeCountDR(1e9) === null) { console.log("  (compiled engine unavailable here — skipped)"); return; }
+  var t0 = Date.now();
+  // structured + log-uniform random x, several α: the algorithm's leaf split
+  // and segment boundaries move with both, and every value must match the
+  // exact Lucy tables (a different algorithm) digit for digit
+  var xs = [1e6, 1e6 + 1, 2 ** 20, 2 ** 24, 1e7, 12345678, 1e8, 123456789, 1e9, 2 ** 30, 2147483647, 4294967296, 1e10, 3e10, 1e11];
+  var seed = 555;
+  for (var i = 0; i < 40; i++) { seed = (seed * 1103515245 + 12345) % 2147483648; xs.push(Math.floor(Math.pow(10, 6 + 5 * (seed / 2147483648)))); }
+  var alphas = [1, 2, 3, 5, 8, 12], bad = 0;
+  for (i = 0; i < xs.length; i++) {
+    var ref = NP.primeCountWasm(xs[i]);
+    var al = alphas[i % alphas.length];
+    var got = NP.primeCountDR(xs[i], null, { alpha: al });
+    if (got !== ref) { bad++; check(false, "DR(α=" + al + ") disagrees at x=" + xs[i] + ": dr=" + got + " lucy=" + ref); }
+  }
+  check(bad === 0, xs.length + " values agree between Deléglise–Rivat and Lucy_Hedgehog (α ∈ {1,2,3,5,8,12})");
+  eq(NP.primeCountDR(1e11), 4118054813, "DR π(10^11)");
+  eq(NP.primeCountDR(1e12), 37607912018, "DR π(10^12)");
+  eq(NP.primeCountLMO(1e10), NP.primeCountDR(1e10), "DR agrees with the JavaScript LMO engine at 10^10");
+  // component-level check against the JavaScript LMO reference for the same y:
+  // phi(x, a) = S0 + hard + easy + trivial, and P2, must match exactly
+  var W = require("../engine-wasm.js").init();
+  [[1e8, 3], [7e9, 8], [1e10, 12]].forEach(function (c) {
+    var x = c[0], al = c[1];
+    var y = Math.floor(NP.icbrt(x) * al), r = NP.isqrt(x); if (y > r - 1) y = r - 1;
+    var v = NP.primeCountDR(x, null, { alpha: al });
+    var part = function (k) { return Number(BigInt.asIntN(64, W.exports.dr_part(k))); };
+    var phiC = part(0) + part(1) + part(2) + part(3), p2C = part(4), aC = part(5);
+    var bp = NP.primesUpTo(r), a = NP.lowerBoundPrime(bp, y + 0.5);
+    eq(aC, a, "DR a = π(y) at x=" + x);
+    eq(phiC, NP.phiLMO(x, y, bp, a, null), "DR φ(x,a) = JS LMO φ at x=" + x + " (y=" + y + ")");
+    eq(p2C, NP.p2Count(x, y, bp, null), "DR P2 = JS LMO P2 at x=" + x);
+    eq(v, NP.primeCountWasm(x), "DR π = Lucy π at x=" + x);
+  });
+  // automatic selection: the compiled Deléglise–Rivat engine counts from 10^9 on
+  check(/Deléglise/.test(NP.countPrimes(1e9).engine), "countPrimes uses the Deléglise–Rivat engine at 10^9");
+  check(/Deléglise/.test(NP.nthPrime(1e8).method), "nthPrime's count uses the Deléglise–Rivat engine");
+  console.log("  ok" + fmtMs(t0));
+})();
+
 section("deterministic polynomial-time primality test (isPrime)");
 (function () {
   // exhaustive agreement with trial division on [0, 2000]
