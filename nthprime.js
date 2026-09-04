@@ -592,14 +592,15 @@
     var largeOff = smallOff + 4 * (r + 2);
     largeOff += (8 - (largeOff % 8)) % 8; // u64 table must be 8-aligned
     var scratchOff = largeOff + 8 * (r + 2); // the sweep's difference array (SEG + 2 u64)
-    var need = scratchOff + 8 * ((W.SEG || 4096) + 2) + 65536;
+    var tblOff = scratchOff + 8 * ((W.SEG || 4096) + 2); // wheel table: u16[30030]
+    var need = tblOff + 60064 + 65536;
     var have = w.memory.buffer.byteLength;
     if (need > have) {
       try { w.memory.grow(Math.ceil((need - have) / 65536)); }
       catch (e) { return null; } // out of memory — JS engine takes over
     }
     W.setProgress(onProgress || null);
-    var v = Number(w.exports.pi_lucy(BigInt(x), smallOff, largeOff, scratchOff));
+    var v = Number(w.exports.pi_lucy(BigInt(x), smallOff, largeOff, scratchOff, tblOff));
     W.setProgress(null);
     return v;
   }

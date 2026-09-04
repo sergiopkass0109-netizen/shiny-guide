@@ -55,7 +55,7 @@
 
     onMessage(function (m) {
       var K = m.K, id = m.id, x = m.x, r = m.r, SEG = m.seg || 4096;
-      var ctrl, par, bp, small, large, D, kern = null;
+      var ctrl, par, bp, small, large, D, TBL, kern = null;
       if (m.memory) {
         // one shared WebAssembly memory: typed-array views for JS, offsets for the kernels
         var buf = m.memory.buffer;
@@ -65,6 +65,7 @@
         small = new Uint32Array(buf, m.smallOff, r + 2);
         large = new Float64Array(buf, m.largeOff, r + 2);
         D = new Float64Array(buf, m.dOff + id * 8 * (SEG + 2), SEG + 2);
+        TBL = new Uint16Array(buf, m.tblOff, 30030);
         try {
           var bin = m.parB64, bytes;
           if (typeof atob === "function") { var str = atob(bin); bytes = new Uint8Array(str.length); for (var bi = 0; bi < str.length; bi++) bytes[bi] = str.charCodeAt(bi); }
@@ -79,8 +80,9 @@
         small = new Uint32Array(m.small);
         large = new Float64Array(m.large);
         D = new Float64Array(SEG + 2);
+        TBL = new Uint16Array(m.tbl);
       }
-      var SO = m.smallOff || 0, LO = m.largeOff || 0, BP = m.bpOff || 0, CT = m.ctrlOff || 0;
+      var SO = m.smallOff || 0, LO = m.largeOff || 0, BP = m.bpOff || 0, CT = m.ctrlOff || 0, TB = m.tblOff || 0;
       var DO = (m.dOff || 0) + id * 8 * (SEG + 2), X = BigInt(x);
 
       // this thread's slice of the index range [lo, hi]
@@ -91,6 +93,16 @@
         var a = lo + id * per;
         var b = Math.min(hi, a + per - 1);
         return a <= b ? [a, b] : null;
+      }
+
+      // wheel start (see engine.c): S after the primes 2..13 = #{t ≤ v coprime to 30030} − 1 + #{wheel primes ≤ v}
+      function wheelTableJS() {
+        var c = 0; TBL[0] = 0;
+        for (var mm = 1; mm < 30030; mm++) { if (mm % 2 && mm % 3 && mm % 5 && mm % 7 && mm % 11 && mm % 13) c++; TBL[mm] = c; }
+      }
+      function s13(v) {
+        var pw = v >= 13 ? 6 : v >= 11 ? 5 : v >= 7 ? 4 : v >= 5 ? 3 : v >= 3 ? 2 : v >= 2 ? 1 : 0;
+        return Math.floor(v / 30030) * 5760 + TBL[v % 30030] - 1 + pw;
       }
 
       function isqrtJ(n) {
@@ -193,8 +205,8 @@
         if (type === T_INIT) {
           c = share(1, r);
           if (!c) return;
-          if (kern) { kern.init_range(SO, LO, X, BigInt(c[0]), BigInt(c[1])); return; }
-          for (v = c[0]; v <= c[1]; v++) { small[v] = v - 1; large[v] = Math.floor(x / v) - 1; }
+          if (kern) { kern.init_range(SO, LO, TB, X, BigInt(c[0]), BigInt(c[1])); return; }
+          for (v = c[0]; v <= c[1]; v++) { small[v] = s13(v); large[v] = s13(Math.floor(x / v)); }
         } else if (type === T_PREFIX) {
           if (par[4]) {                                   // hazard-free tail: dynamic chunks of par[4]
             if (kern) kern.prefix_dyn(SO, LO, BP, CT, par[1], BigInt(par[2]), BigInt(par[3]), BigInt(par[4]));
@@ -313,12 +325,13 @@
         }
       }
 
+      if (kern) kern.wheel_table(TB); else wheelTableJS();     // once, before the threads read it
       dispatch(T_INIT, 0, 0, 0, 0);
       // blocks start once the prefix I0 = max(r/p, x/p³) is at most r/2, i.e. p³ ≥ 2x/r
       var pb3 = 2 * Math.floor(x / r), pblock = 3;
       while (pblock * pblock * pblock < pb3) pblock++;
       var nextProg = 0, j;
-      for (var p = 2; p <= r;) {
+      for (var p = 17; p <= r;) {                               // the tables already hold the passes 2..13
         if (p >= nextProg) { nextProg = p + 2048; post({ progress: p / r }); }
         if (small[p] === small[p - 1]) { p++; continue; }
         if (p < pblock) {
@@ -439,21 +452,23 @@
         var largeOff = smallOff + 4 * (r + 2);
         largeOff += (8 - (largeOff % 8)) % 8;
         var dOff = largeOff + 8 * (r + 2);
-        var total = dOff + K * 8 * (SEG + 2) + 65536;
+        var tblOff = dOff + K * 8 * (SEG + 2);
+        var total = tblOff + 60064 + 65536;
         // exactly what we need (never grows); a 4 GiB reservation makes some
         // browsers refuse shared memory and silently fall back to JS kernels
         var pages = Math.max(17, Math.ceil(total / 65536));
         try {
           var memory = new WebAssembly.Memory({ initial: pages, maximum: pages, shared: true });
           init = { memory: memory, ctrlOff: ctrlOff, parOff: parOff, bpOff: bpOff, smallOff: smallOff, largeOff: largeOff,
-                   dOff: dOff, parB64: W.parB64, simd: !!W.simd, seg: SEG };
+                   dOff: dOff, tblOff: tblOff, parB64: W.parB64, simd: !!W.simd, seg: SEG };
         } catch (e) { init = null; }
       }
       if (!init) {
         try {
           init = {
             ctrl: new SharedArrayBuffer(64), par: new SharedArrayBuffer(64), bp: new SharedArrayBuffer(8 * BP_LEN),
-            small: new SharedArrayBuffer(4 * (r + 2)), large: new SharedArrayBuffer(8 * (r + 2)), seg: SEG
+            small: new SharedArrayBuffer(4 * (r + 2)), large: new SharedArrayBuffer(8 * (r + 2)),
+            tbl: new SharedArrayBuffer(60064), seg: SEG
           };
         } catch (e) {
           return reject(new Error("not enough memory for the multi-core tables (" + Math.round(12 * r / 1048576) + " MB)"));

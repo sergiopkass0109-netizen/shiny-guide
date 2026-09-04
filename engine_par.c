@@ -27,6 +27,25 @@
 
 typedef uint64_t u64;
 typedef uint32_t u32;
+typedef uint16_t u16;
+
+/* wheel start (see engine.c): the tables begin after the primes 2..13 */
+#define WHEEL 30030u
+#define WHEEL_PHI 5760u
+__attribute__((export_name("wheel_table")))
+void wheel_table(u32 tblOff) {
+  u16 *T = (u16 *)(uintptr_t)tblOff;
+  u32 c = 0;
+  T[0] = 0;
+  for (u32 m = 1; m < WHEEL; m++) {
+    if (m % 2 && m % 3 && m % 5 && m % 7 && m % 11 && m % 13) c++;
+    T[m] = (u16)c;
+  }
+}
+static inline u64 s13(u64 v, const u16 *T) {
+  u64 pw = v >= 13 ? 6 : v >= 11 ? 5 : v >= 7 ? 4 : v >= 5 ? 3 : v >= 3 ? 2 : v >= 2 ? 1 : 0;
+  return (v / WHEEL) * WHEEL_PHI + T[v % WHEEL] - 1 + pw;
+}
 
 #ifndef SEG
 #define SEG 4096     /* large[] entries per sweep segment (32 KiB); scratch is SEG+2 doubles per thread */
@@ -90,12 +109,13 @@ static inline void tail_range_d(const u32 *small, double *large, u64 a, u64 b, u
 }
 
 __attribute__((export_name("init_range")))
-void init_range(u32 smallOff, u32 largeOff, u64 x, u64 a, u64 b) {
+void init_range(u32 smallOff, u32 largeOff, u32 tblOff, u64 x, u64 a, u64 b) {
   u32 *small = (u32 *)(uintptr_t)smallOff;
   double *large = (double *)(uintptr_t)largeOff;
+  const u16 *T = (const u16 *)(uintptr_t)tblOff;
   for (u64 v = a; v <= b; v++) {
-    small[v] = (u32)(v - 1);
-    large[v] = (double)(fdiv(x, v) - 1);
+    small[v] = (u32)s13(v, T);
+    large[v] = (double)s13(fdiv(x, v), T);
   }
 }
 

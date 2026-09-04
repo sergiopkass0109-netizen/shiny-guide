@@ -9,6 +9,7 @@
  *   small:   u32[r+1]     at smallOff    S(v) for v <= r,      r = isqrt(x)
  *   large:   u64[r+1]     at largeOff    S(floor(x/i)) for i <= r
  *   scratch: u64[SEG+2]   at scratchOff  per-segment difference array
+ *   wheel:   u16[30030]   at tblOff      cumulative coprime-to-30030 counts
  *
  * How the hot loop is organised (all of it exact; see the comments):
  *  - a pass for prime p updates large[i] -= S(x/(ip)) - pi(p-1); for
@@ -34,6 +35,27 @@
 
 typedef uint64_t u64;
 typedef uint32_t u32;
+typedef uint16_t u16;
+
+/* Wheel start: the tables begin at the state after the passes for 2, 3, 5,
+ * 7, 11 and 13 instead of running those six full passes.  Lucy's invariant
+ * is S_p(v) = #{m in [2, v] : m prime or lpf(m) > p}; after 13 that is the
+ * count of m <= v coprime to 30030, minus one for m = 1, plus the wheel
+ * primes <= v.  T[m] = #{1 <= t <= m : gcd(t, 30030) = 1} for m < 30030. */
+#define WHEEL 30030u
+#define WHEEL_PHI 5760u
+static void wheel_table(u16 *T) {
+  u32 c = 0;
+  T[0] = 0;
+  for (u32 m = 1; m < WHEEL; m++) {
+    if (m % 2 && m % 3 && m % 5 && m % 7 && m % 11 && m % 13) c++;
+    T[m] = (u16)c;
+  }
+}
+static inline u64 s13(u64 v, const u16 *T) {
+  u64 pw = v >= 13 ? 6 : v >= 11 ? 5 : v >= 7 ? 4 : v >= 5 ? 3 : v >= 3 ? 2 : v >= 2 ? 1 : 0;
+  return (v / WHEEL) * WHEEL_PHI + T[v % WHEEL] - 1 + pw;
+}
 
 #ifndef KMAX
 #define KMAX 32      /* primes per block */
@@ -153,15 +175,19 @@ static inline void prefix_pass(const u32 *small, u64 *large, u64 r, u64 I0, u64 
 }
 
 __attribute__((export_name("pi_lucy")))
-u64 pi_lucy(u64 x, u32 smallOff, u32 largeOff, u32 scratchOff) {
+u64 pi_lucy(u64 x, u32 smallOff, u32 largeOff, u32 scratchOff, u32 tblOff) {
   if (x < 2) return 0;
   u64 r = isqrt64(x);
   u32 *small = (u32 *)(uintptr_t)smallOff;
   u64 *large = (u64 *)(uintptr_t)largeOff;
   u64 *D = (u64 *)(uintptr_t)scratchOff;
+  u16 *T = (u16 *)(uintptr_t)tblOff;
 
-  for (u64 v = 1; v <= r; v++) small[v] = (u32)(v - 1);
-  for (u64 i = 1; i <= r; i++) large[i] = fdiv(x, i) - 1;
+  /* tables at the state after the primes <= 13; for v < 17^2 that is pi(v),
+   * so the primality tests below are already exact from p = 17 on */
+  wheel_table(T);
+  for (u64 v = 1; v <= r; v++) small[v] = (u32)s13(v, T);
+  for (u64 i = 1; i <= r; i++) large[i] = s13(fdiv(x, i), T);
 
   /* blocks start once the prefix I0 = max(r/p, x/p^3) is at most r/2,
    * i.e. p^3 >= 2x/r (a few hundred at most: the loop is negligible) */
@@ -170,7 +196,7 @@ u64 pi_lucy(u64 x, u32 smallOff, u32 largeOff, u32 scratchOff) {
 
   u64 P[KMAX], XP[KMAX], SP1[KMAX], IMAX[KMAX], G[KMAX];
   u64 nextProg = 0;
-  for (u64 p = 2; p <= r;) {
+  for (u64 p = 17; p <= r;) {
     if (p >= nextProg) { host_progress(p, r); nextProg = p + 2048; }
     if (small[p] == small[p - 1]) { p++; continue; }   /* p composite */
 

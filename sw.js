@@ -5,7 +5,7 @@
  *     multi-threaded engine.  No external resources are loaded, so the strict
  *     embedder policy costs nothing.
  */
-var CACHE = "nthprime-v2.6.0";
+var CACHE = "nthprime-v2.7.0";
 var SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", function (e) {

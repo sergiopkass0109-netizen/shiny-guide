@@ -225,6 +225,12 @@ the same recurrence is evaluated:
   prime in the classical order; its reads of `large[m]` with I₀ < m ≤ r add
   back the sweep's contributions of the later primes, so every value read is
   exactly S at the right stage.
+* **Wheel start (2.7).** The tables begin at the state after the passes for
+  2, 3, 5, 7, 11 and 13 — Lucy's invariant makes that state explicit:
+  S(v) = #{m ≤ v coprime to 30030} − 1 + #{wheel primes ≤ v}, one table
+  lookup per entry — instead of running those six full passes, which carried
+  the largest heads of all (√(x/2) divisions for p = 2). Measured +6–9% in
+  every mode.
 * **Prefixes split around the sweep (2.6).** The prefix reads above I₀
   need one correction per later prime of the block; doing the first half of
   the block's prefixes *before* the sweep (correcting for the earlier primes
@@ -235,6 +241,15 @@ the same recurrence is evaluated:
   expensive), signed float→int conversion (−44%), a split division/gather
   loop with `f64x2.div` (−14 to −21%). Auto-vectorised fills (+10–20%) and
   non-trapping float→int conversion (+13%) did, and stayed.
+* **Index-major heads with per-prime reciprocals, rejected (2.7).** For one
+  index the block's 32 quotients are ⌊y/p_j⌋ with the same y = ⌊x/i⌋, so one
+  division plus 32 multiplications by 1/p_j (exact with a one-step
+  correction, or with a cheap fraction test) could replace 32 divisions and
+  32 read-modify-writes. Built, verified exact, and measured 0.62× and
+  0.85×: in this runtime the loop is bound by instruction count, not by the
+  divider, and the multiply-and-fix path issues more instructions than the
+  division it removes. Block size (48, 64) and segment size (8192) changed
+  nothing outside noise.
 * **The primes above ∛x, three ways, all rejected (2.6).** For p³ > x the
   passes commute (every read is final), so they can be summed per index
   with no barriers at all. Three orders were built and verified exact:
