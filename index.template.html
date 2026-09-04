@@ -324,6 +324,7 @@
       if (id !== jobId) return;
       parJob = null;
       var msCount = now() - t0;
+      label += " · " + NthPrimeParallel.kernels() + " kernels";
       if (op === "pi") {
         setBusy(false);
         showPiResult(arg, { x: arg, value: c0, engine: label, ms: msCount });

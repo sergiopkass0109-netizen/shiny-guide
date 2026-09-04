@@ -591,14 +591,15 @@
     var smallOff = 131072; // above the module's shadow stack + globals region
     var largeOff = smallOff + 4 * (r + 2);
     largeOff += (8 - (largeOff % 8)) % 8; // u64 table must be 8-aligned
-    var need = largeOff + 8 * (r + 2) + 65536;
+    var scratchOff = largeOff + 8 * (r + 2); // the sweep's difference array (SEG + 2 u64)
+    var need = scratchOff + 8 * ((W.SEG || 4096) + 2) + 65536;
     var have = w.memory.buffer.byteLength;
     if (need > have) {
       try { w.memory.grow(Math.ceil((need - have) / 65536)); }
       catch (e) { return null; } // out of memory — JS engine takes over
     }
     W.setProgress(onProgress || null);
-    var v = Number(w.exports.pi_lucy(BigInt(x), smallOff, largeOff));
+    var v = Number(w.exports.pi_lucy(BigInt(x), smallOff, largeOff, scratchOff));
     W.setProgress(null);
     return v;
   }
@@ -641,7 +642,22 @@
       // (⌊⌊N/p⌋/i⌋ = ⌊N/(p·i)⌋).
       var iSwitch = Math.min(imax, Math.floor(r / p));
       for (i = 1; i <= iSwitch; i++) large[i] -= large[i * p] - sp1;
-      for (; i <= imax; i++) large[i] -= small[Math.floor(Np / i)] - sp1;
+      // beyond √Np consecutive i share one quotient q; the run of q is
+      // (⌊Np/(q+1)⌋, ⌊Np/q⌋] (i ≤ ⌊Np/q⌋ ⇒ Np/i ≥ q and i > ⌊Np/(q+1)⌋ ⇒
+      // Np/i < q+1), so walking q downward costs one independent division
+      // per run instead of a latency chain of two.
+      var iGroup = Math.min(imax + 1, Math.max(i, isqrt(Np)));
+      for (; i < iGroup; i++) large[i] -= small[Math.floor(Np / i)] - sp1;
+      if (i <= imax) {
+        var q0 = Math.floor(Np / i), qMin = Math.max(1, Math.floor(Np / imax));
+        var ePrev = i - 1;
+        for (; q0 >= qMin; q0--) {
+          var iEnd = Math.min(imax, Math.floor(Np / q0));
+          var c0 = small[q0] - sp1;
+          for (var j = ePrev + 1; j <= iEnd; j++) large[j] -= c0;
+          ePrev = iEnd;
+        }
+      }
       // Descending update keeps small[q] (q = ⌊v/p⌋ < v) at its
       // previous-pass value until v itself reaches q.  Values of v sharing
       // the same quotient q are processed as one block.

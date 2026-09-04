@@ -2,20 +2,31 @@
  * parallel.js — multi-core exact prime counting: the verified Lucy_Hedgehog
  * recurrence over SharedArrayBuffer, K threads, no locks in the hot loops.
  *
- * Why it is exact.  Within one prime p the recurrence writes large[i] while
- * reading large[i·p] (a HIGHER index) and writes small[v] while reading
- * small[⌊v/p⌋] (a LOWER index).  Processing the index range in geometric
+ * Schedule.  Primes are processed exactly as in engine.c: small primes one
+ * at a time, larger primes in blocks of up to 32 consecutive primes
+ * p1 < … < pk ≤ 2·p1.  For a block, every update of large[i] with
+ * i > I0 = max(r/p1, x/p1³) reads only small[q] with q < p1² — a region no
+ * small-pass of the block touches — so all k passes over large[(I0, imax]]
+ * commute and are applied in ONE cache-blocked sweep (segments of SEG
+ * entries, each prime's runs into a per-thread difference array, one
+ * prefix-sum pass per segment).  The sweep has no data hazards at all: the
+ * threads simply split the index range.  The prefix i ≤ I0 is then done
+ * prime by prime in the classical order; there, and for the small primes,
+ * the pass writes large[i] while reading large[i·p] (a HIGHER index) and
+ * writes small[v] while reading small[⌊v/p⌋] (a LOWER index), so geometric
  * bands — [p^k, p^{k+1}) ascending for `large`, (r/p^{k+1}, r/p^k] descending
- * for `small` — makes every band read only indices outside itself that no
- * band has written yet in this pass, so a band can be split across threads
- * freely.  One barrier per band; a few thousand barriers per query.  Primes
- * with little work (imax < 2^15) are done by the coordinator alone, exactly
- * as in the single-thread engine.  Results are cross-checked against the
- * three single-thread engines in the test suite.
+ * for `small` — read only indices outside themselves that no band has
+ * written yet in this pass, and each band can be split across threads
+ * freely.  One barrier per band or sweep.  Primes with little work
+ * (imax < 2^16) are done by the coordinator alone, exactly as in the
+ * single-thread engine.  Results are cross-checked against the three
+ * single-thread engines in the test suite.
  *
  * Runs in Node (worker_threads) and in browsers that are cross-origin
  * isolated (the app's service worker arranges that on GitHub Pages).  The
- * same source runs in every thread; thread 0 coordinates.
+ * same source runs in every thread; thread 0 coordinates.  Kernels are the
+ * shared-memory WebAssembly build of engine_par.c; every kernel has a
+ * line-for-line JavaScript twin used where that module cannot load.
  */
 (function (root, factory) {
   "use strict";
@@ -26,28 +37,34 @@
 
   var IS_NODE = typeof process !== "undefined" && !!(process.versions && process.versions.node) &&
                 typeof require === "function";
+  var KMAX = 32;                 // primes per block (matches engine.c)
+  var BP_LEN = 8 + 5 * KMAX;     // block-parameter table: header + 5 doubles per prime
 
   // ---- thread body: self-contained, serialised with toString() ----------
   function workerMain() {
-    var GEN = 0, REM = 1;
-    var T_INIT = 1, T_LARGE = 2, T_SMALL = 3, T_EXIT = 9;
+    var GEN = 0, REM = 1, NEXT = 2;   // control words: generation, threads remaining, next chunk
+    var T_INIT = 1, T_PREFIX = 2, T_SMALL = 3, T_SWEEP = 4, T_EXIT = 9;
     var PAR_MIN = 1 << 16;   // primes with less work than this: coordinator alone
-    var SEQ_MIN = 1 << 12;   // bands smaller than this: not worth waking the threads
+    var SEQ_MIN = 1 << 12;   // band ranges smaller than this: not worth waking the threads
+    var DYN_MIN = 1 << 10;   // dynamically shared ranges are worth a barrier from here on
+    var KMAX = 32, BP_LEN = 8 + 5 * KMAX;
     var isNode = typeof self === "undefined";
     var port = isNode ? require("worker_threads").parentPort : null;
     function post(m) { if (isNode) port.postMessage(m); else self.postMessage(m); }
     function onMessage(f) { if (isNode) port.on("message", f); else self.onmessage = function (e) { f(e.data); }; }
 
     onMessage(function (m) {
-      var K = m.K, id = m.id, x = m.x, r = m.r;
-      var ctrl, par, small, large, kern = null;
+      var K = m.K, id = m.id, x = m.x, r = m.r, SEG = m.seg || 4096;
+      var ctrl, par, bp, small, large, D, kern = null;
       if (m.memory) {
         // one shared WebAssembly memory: typed-array views for JS, offsets for the kernels
         var buf = m.memory.buffer;
         ctrl = new Int32Array(buf, m.ctrlOff, 16);
         par = new Float64Array(buf, m.parOff, 8);
+        bp = new Float64Array(buf, m.bpOff, BP_LEN);
         small = new Uint32Array(buf, m.smallOff, r + 2);
         large = new Float64Array(buf, m.largeOff, r + 2);
+        D = new Float64Array(buf, m.dOff + id * 8 * (SEG + 2), SEG + 2);
         try {
           var bin = m.parB64, bytes;
           if (typeof atob === "function") { var str = atob(bin); bytes = new Uint8Array(str.length); for (var bi = 0; bi < str.length; bi++) bytes[bi] = str.charCodeAt(bi); }
@@ -58,10 +75,13 @@
       } else {
         ctrl = new Int32Array(m.ctrl);
         par = new Float64Array(m.par);
+        bp = new Float64Array(m.bp);
         small = new Uint32Array(m.small);
         large = new Float64Array(m.large);
+        D = new Float64Array(SEG + 2);
       }
-      var SO = m.smallOff || 0, LO = m.largeOff || 0, X = BigInt(x);
+      var SO = m.smallOff || 0, LO = m.largeOff || 0, BP = m.bpOff || 0, CT = m.ctrlOff || 0;
+      var DO = (m.dOff || 0) + id * 8 * (SEG + 2), X = BigInt(x);
 
       // this thread's slice of the index range [lo, hi]
       function share(lo, hi) {
@@ -73,33 +93,124 @@
         return a <= b ? [a, b] : null;
       }
 
+      function isqrtJ(n) {
+        var s = Math.floor(Math.sqrt(n));
+        while ((s + 1) * (s + 1) <= n) s++;
+        while (s * s > n) s--;
+        return s;
+      }
+
+      // ---- JavaScript twins of the engine_par.c kernels ----
+      // large[i] -= small[⌊xp/i⌋] - sp1 for i in [a, b]; g = isqrt(xp).  Head
+      // (i < g): one division each; then runs of equal quotient q, walked
+      // downward — the run of q is (⌊xp/(q+1)⌋, ⌊xp/q⌋].
+      function tailJS(a, b, xp, sp1, g) {
+        var i = a, h = Math.min(b + 1, Math.max(a, g));
+        for (; i < h; i++) large[i] -= small[Math.floor(xp / i)] - sp1;
+        if (i > b) return;
+        var q = Math.floor(xp / i), qMin = Math.max(1, Math.floor(xp / b)), ePrev = i - 1;
+        for (; q >= qMin; q--) {
+          var e = Math.min(b, Math.floor(xp / q)), c = small[q] - sp1;
+          for (var j = ePrev + 1; j <= e; j++) large[j] -= c;
+          ePrev = e;
+        }
+      }
+      // sweep twin: runs go to the difference array D (indexed i - base)
+      function tailDJS(a, b, xp, sp1, g, base) {
+        var i = a, h = Math.min(b + 1, Math.max(a, g));
+        for (; i < h; i++) large[i] -= small[Math.floor(xp / i)] - sp1;
+        if (i > b) return;
+        var q = Math.floor(xp / i), qMin = Math.max(1, Math.floor(xp / b)), ePrev = i - 1;
+        for (; q >= qMin; q--) {
+          var e = Math.min(b, Math.floor(xp / q)), c = small[q] - sp1;
+          D[ePrev + 1 - base] += c;
+          D[e + 1 - base] -= c;
+          ePrev = e;
+        }
+      }
+      // prefix pass of block prime j over [a, b] (b ≤ min(I0, IMAX[j]))
+      function prefixJS(j, a, b) {
+        var k = bp[0], I0 = bp[1];
+        var p = bp[8 + 5 * j], xp = bp[9 + 5 * j], sp1 = bp[10 + 5 * j], g = bp[12 + 5 * j];
+        var isw = Math.min(b, Math.floor(r / p)), i1 = Math.min(isw, Math.floor(I0 / p));
+        var i = a;
+        for (; i <= i1; i++) large[i] -= large[i * p] - sp1;
+        for (; i <= isw; i++) {
+          // I0 < m ≤ r: add back the sweep's contributions of primes l ≥ j
+          var mm = i * p, val = large[mm];
+          for (var l = j; l < k && bp[11 + 5 * l] >= mm; l++) val += small[Math.floor(bp[9 + 5 * l] / mm)] - bp[10 + 5 * l];
+          large[i] -= val - sp1;
+        }
+        tailJS(i, b, xp, sp1, g);
+      }
+      // cache-blocked sweep of [a, b] (a > I0, b ≤ IMAX[0]) for every prime of the block
+      function sweepJS(a, b) {
+        var k = bp[0], t, j;
+        for (var L = a; L <= b;) {
+          var R = Math.min(b, L + SEG - 1), n = R - L + 1;
+          for (t = 0; t <= n; t++) D[t] = 0;
+          for (j = 0; j < k && bp[11 + 5 * j] >= L; j++) tailDJS(L, Math.min(R, bp[11 + 5 * j]), bp[9 + 5 * j], bp[10 + 5 * j], bp[12 + 5 * j], L);
+          var acc = 0;
+          for (t = 0; t < n; t++) { acc += D[t]; large[L + t] -= acc; }
+          L = R + 1;
+        }
+      }
+      // dynamic sharing of [lo, hi]: chunk s is [lo + s·ch, lo + (s+1)·ch − 1]
+      function sweepDynJS(lo, hi, ch) {
+        for (;;) {
+          var L = lo + Atomics.add(ctrl, NEXT, 1) * ch;
+          if (L > hi) break;
+          sweepJS(L, Math.min(hi, L + ch - 1));
+        }
+      }
+      function prefixDynJS(j, lo, hi, ch) {
+        for (;;) {
+          var L = lo + Atomics.add(ctrl, NEXT, 1) * ch;
+          if (L > hi) break;
+          prefixJS(j, L, Math.min(hi, L + ch - 1));
+        }
+      }
+      function blockTailJS() {
+        var k = bp[0], I0 = bp[1];
+        for (var j = 0; j < k; j++) {
+          var imaxj = Math.min(I0, bp[11 + 5 * j]);
+          if (imaxj >= 1) prefixJS(j, 1, imaxj);
+          var p = bp[8 + 5 * j], p2 = p * p;
+          if (p2 <= r) smallJS(p2, r, p, bp[10 + 5 * j]);
+        }
+      }
+      function smallJS(a, b, p, sp1) {
+        for (var v = b; v >= a;) {
+          var q = Math.floor(v / p), w = Math.max(q * p, a), sub = small[q] - sp1;
+          for (; v >= w; v--) small[v] -= sub;
+        }
+      }
+
       function task(type) {
-        var c, i, v;
+        var c, v;
         if (type === T_INIT) {
           c = share(1, r);
           if (!c) return;
           if (kern) { kern.init_range(SO, LO, X, BigInt(c[0]), BigInt(c[1])); return; }
           for (v = c[0]; v <= c[1]; v++) { small[v] = v - 1; large[v] = Math.floor(x / v) - 1; }
-        } else if (type === T_LARGE) {
-          var p = par[3], sp1 = par[4], xp = par[5], iSw = par[6];
-          c = share(par[1], par[2]);
-          if (!c) return;
-          if (kern) { kern.large_range(SO, LO, BigInt(c[0]), BigInt(c[1]), BigInt(p), BigInt(sp1), BigInt(xp), BigInt(iSw)); return; }
-          var e1 = Math.min(c[1], iSw);
-          for (i = c[0]; i <= e1; i++) large[i] -= large[i * p] - sp1;
-          for (; i <= c[1]; i++) large[i] -= small[Math.floor(xp / i)] - sp1;
-        } else if (type === T_SMALL) {
-          var pp = par[3], s1 = par[4];
-          c = share(par[1], par[2]);
-          if (!c) return;
-          if (kern) { kern.small_range(SO, BigInt(c[0]), BigInt(c[1]), BigInt(pp), BigInt(s1)); return; }
-          var a = c[0];
-          for (v = c[1]; v >= a;) {
-            var q = Math.floor(v / pp);
-            var w = Math.max(q * pp, a);
-            var sub = small[q] - s1;
-            for (; v >= w; v--) small[v] -= sub;
+        } else if (type === T_PREFIX) {
+          if (par[4]) {                                   // hazard-free tail: dynamic chunks of par[4]
+            if (kern) kern.prefix_dyn(SO, LO, BP, CT, par[1], BigInt(par[2]), BigInt(par[3]), BigInt(par[4]));
+            else prefixDynJS(par[1], par[2], par[3], par[4]);
+            return;
           }
+          c = share(par[2], par[3]);                      // band: equal shares, uniform cost
+          if (!c) return;
+          if (kern) kern.prefix_range(SO, LO, BP, par[1], BigInt(c[0]), BigInt(c[1]));
+          else prefixJS(par[1], c[0], c[1]);
+        } else if (type === T_SWEEP) {
+          if (kern) kern.sweep_dyn(SO, LO, BP, DO, CT, BigInt(par[1]), BigInt(par[2]), BigInt(par[3]));
+          else sweepDynJS(par[1], par[2], par[3]);
+        } else if (type === T_SMALL) {
+          c = share(par[1], par[2]);
+          if (!c) return;
+          if (kern) kern.small_range(SO, BigInt(c[0]), BigInt(c[1]), BigInt(par[3]), BigInt(par[4]));
+          else smallJS(c[0], c[1], par[3], par[4]);
         }
       }
 
@@ -118,8 +229,9 @@
       }
 
       // ---- coordinator (thread 0) ----
-      function dispatch(type, a1, a2, a3, a4, a5, a6) {
-        par[0] = type; par[1] = a1; par[2] = a2; par[3] = a3; par[4] = a4; par[5] = a5; par[6] = a6;
+      function dispatch(type, a1, a2, a3, a4) {
+        par[0] = type; par[1] = a1; par[2] = a2; par[3] = a3; par[4] = a4;
+        Atomics.store(ctrl, NEXT, 0);
         Atomics.store(ctrl, REM, K - 1);
         Atomics.add(ctrl, GEN, 1);
         Atomics.notify(ctrl, GEN);
@@ -127,84 +239,125 @@
         var rem;
         while ((rem = Atomics.load(ctrl, REM)) > 0) Atomics.wait(ctrl, REM, rem);
       }
+      // chunk size for a dynamically shared range: a few chunks per thread, never above a segment
+      function chunkFor(len) { return Math.max(256, Math.min(SEG, Math.ceil(len / (4 * K)))); }
+      function prefixRange(j, a, b) {
+        if (a > b) return;
+        if (kern) kern.prefix_range(SO, LO, BP, j, BigInt(a), BigInt(b));
+        else prefixJS(j, a, b);
+      }
 
-      dispatch(T_INIT, 0, 0, 0, 0, 0, 0);
-      var nextProg = 0;
-      for (var p = 2; p <= r; p++) {
-        if (p >= nextProg) { nextProg = p + 2048; post({ progress: p / r }); }
-        if (small[p] === small[p - 1]) continue;
-        var sp1 = small[p - 1], p2 = p * p, xp = Math.floor(x / p);
-        var imax = Math.min(r, Math.floor(x / p2));
-        var iSw = Math.min(imax, Math.floor(r / p));
-        var i, v;
-        if (imax < PAR_MIN) {
-          // little work: identical to the single-thread engine
-          if (kern) {
-            kern.large_range(SO, LO, BigInt(1), BigInt(imax), BigInt(p), BigInt(sp1), BigInt(xp), BigInt(iSw));
-            if (p2 <= r) kern.small_range(SO, BigInt(p2), BigInt(r), BigInt(p), BigInt(sp1));
-            continue;
-          }
-          for (i = 1; i <= iSw; i++) large[i] -= large[i * p] - sp1;
-          for (; i <= imax; i++) large[i] -= small[Math.floor(xp / i)] - sp1;
-          if (p2 <= r) {
-            for (v = r; v >= p2;) {
-              var q = Math.floor(v / p), sub = small[q] - sp1, w = Math.max(q * p, p2);
-              for (; v >= w; v--) small[v] -= sub;
-            }
-          }
-          continue;
+      // block parameters (shared with every thread and both kernel kinds)
+      var P = new Array(KMAX);
+      function setBlock(k, I0) {
+        bp[0] = k; bp[1] = I0; bp[2] = r;
+        for (var j = 0; j < k; j++) {
+          var pj = P[j], xp = Math.floor(x / pj);
+          bp[8 + 5 * j] = pj;
+          bp[9 + 5 * j] = xp;
+          bp[10 + 5 * j] = small[pj - 1];                       // π(p_j − 1): final, p_j − 1 < p1²
+          bp[11 + 5 * j] = Math.min(r, Math.floor(x / (pj * pj)));
+          bp[12 + 5 * j] = isqrtJ(xp);
         }
-        // large[]: a read at i·p collides with this pass's writes only when i·p ≤ imax, i.e. i ≤ H.
-        // Ascending sequential order is always correct, so the coordinator handles the
-        // small low bands itself and threads take over once a band is big enough.
-        var H = Math.min(iSw, Math.floor(imax / p));
+      }
+
+      // large[i] for i in [1, imaxj] of block prime j, imaxj ≤ min(I0, IMAX[j]).
+      // A read at i·p collides with this pass's writes only when i·p ≤ imaxj,
+      // i.e. i ≤ H; ascending order is always correct, so the coordinator
+      // handles the small low bands itself and the threads take over once a
+      // band is big enough.  Reads above I0 are never written in this pass.
+      function prefixPass(j, imaxj) {
+        var p = bp[8 + 5 * j];
+        if (imaxj < PAR_MIN) { prefixRange(j, 1, imaxj); return; }
+        var iSw = Math.min(imaxj, Math.floor(r / p));
+        var H = Math.min(iSw, Math.floor(imaxj / p));
         var seqEnd = Math.min(H, Math.max(p - 1, SEQ_MIN));
-        for (i = 1; i <= seqEnd; i++) large[i] -= large[i * p] - sp1;
+        prefixRange(j, 1, seqEnd);
         var lo = seqEnd + 1;
         while (lo <= H) {                                      // bands [lo, lo·p) ascending
           var hi = Math.min(lo * p - 1, H);
-          dispatch(T_LARGE, lo, hi, p, sp1, xp, iSw);
+          dispatch(T_PREFIX, j, lo, hi, 0);
           lo = hi + 1;
         }
-        if (H + 1 <= imax) {                                   // hazard-free tail
-          if (imax - H >= SEQ_MIN) dispatch(T_LARGE, H + 1, imax, p, sp1, xp, iSw);
-          else {
-            var t1 = Math.min(imax, iSw);
-            for (i = H + 1; i <= t1; i++) large[i] -= large[i * p] - sp1;
-            for (; i <= imax; i++) large[i] -= small[Math.floor(xp / i)] - sp1;
-          }
+        if (H + 1 <= imaxj) {                                  // hazard-free tail
+          if (imaxj - H >= DYN_MIN) dispatch(T_PREFIX, j, H + 1, imaxj, chunkFor(imaxj - H));
+          else prefixRange(j, H + 1, imaxj);
         }
-        // small[]: descending bands, each reading only below itself; the big
-        // bands (near r) go to the threads, the small tail stays sequential.
-        if (p2 <= r) {
-          var U = r;
+      }
+      // small[]: descending bands, each reading only below itself; the big
+      // bands (near r) go to the threads, the small tail stays sequential.
+      function smallPass(p, sp1) {
+        var p2 = p * p;
+        if (p2 > r) return;
+        var U = r;
+        if (r >= PAR_MIN) {
           while (U >= p2) {
             var L = Math.max(p2, Math.floor(U / p) + 1);
             if (U - L + 1 < SEQ_MIN) break;
-            dispatch(T_SMALL, L, U, p, sp1, 0, 0);
+            dispatch(T_SMALL, L, U, p, sp1);
             U = L - 1;
           }
-          for (v = U; v >= p2;) {                              // exact single-thread order
-            var q2 = Math.floor(v / p), sub2 = small[q2] - sp1, w2 = Math.max(q2 * p, p2);
-            for (; v >= w2; v--) small[v] -= sub2;
+        }
+        if (U >= p2) {
+          if (kern) kern.small_range(SO, BigInt(p2), BigInt(U), BigInt(p), BigInt(sp1));
+          else smallJS(p2, U, p, sp1);
+        }
+      }
+
+      dispatch(T_INIT, 0, 0, 0, 0);
+      // blocks start once the prefix I0 = max(r/p, x/p³) is at most r/2, i.e. p³ ≥ 2x/r
+      var pb3 = 2 * Math.floor(x / r), pblock = 3;
+      while (pblock * pblock * pblock < pb3) pblock++;
+      var nextProg = 0, j;
+      for (var p = 2; p <= r;) {
+        if (p >= nextProg) { nextProg = p + 2048; post({ progress: p / r }); }
+        if (small[p] === small[p - 1]) { p++; continue; }
+        if (p < pblock) {
+          // classical single-prime pass: a block of one with I0 = r (no sweep)
+          P[0] = p;
+          setBlock(1, r);
+          prefixPass(0, bp[11]);
+          smallPass(p, bp[10]);
+          p++;
+          continue;
+        }
+        var k = 0;
+        for (var q = p; q <= r && q <= 2 * p && k < KMAX; q++) if (small[q] !== small[q - 1]) P[k++] = q;
+        var p1 = P[0], I0 = Math.floor(r / p1);
+        if (p1 * p1 * p1 <= x) I0 = Math.max(I0, Math.floor(x / (p1 * p1 * p1)));
+        setBlock(k, I0);
+        var sweepHi = bp[11];                                   // IMAX[0]
+        if (sweepHi > I0) {
+          if (sweepHi - I0 >= DYN_MIN) dispatch(T_SWEEP, I0 + 1, sweepHi, chunkFor(sweepHi - I0), 0);
+          else if (kern) kern.sweep_range(SO, LO, BP, DO, BigInt(I0 + 1), BigInt(sweepHi));
+          else sweepJS(I0 + 1, sweepHi);
+        }
+        if (I0 < PAR_MIN && p1 * p1 > r) {
+          // every prefix is coordinator-only and there are no small-passes: one call
+          if (kern) kern.block_tail(SO, LO, BP); else blockTailJS();
+        } else {
+          for (j = 0; j < k; j++) {
+            prefixPass(j, Math.min(I0, bp[11 + 5 * j]));
+            smallPass(P[j], bp[10 + 5 * j]);
           }
         }
+        p = P[k - 1] + 1;
       }
       par[0] = T_EXIT;
       Atomics.add(ctrl, GEN, 1);
       Atomics.notify(ctrl, GEN);
-      post({ done: true, value: large[1], kernels: kern ? "wasm" : "js" });
+      post({ done: true, value: large[1], kernels: kern ? (m.simd ? "wasm+simd" : "wasm") : "js" });
     });
   }
 
   var WORKER_SRC = "(" + workerMain.toString() + ")()";
 
-  // base64 of the thread-safe kernels, from engine-wasm.js (inlined in the page, required in Node)
-  function parModuleB64() {
+  // the thread-safe kernels, from engine-wasm.js (inlined in the page, required in Node)
+  function wasmModule() {
     try {
       var W = typeof NthPrimeWasm !== "undefined" ? NthPrimeWasm : (IS_NODE ? require("./engine-wasm.js") : null);
-      return W && W.parB64 ? W.parB64 : "";
-    } catch (e) { return ""; }
+      return W && W.parB64 ? W : null;
+    } catch (e) { return null; }
   }
   var lastKernels = "none";
 
@@ -258,25 +411,31 @@
       if (K < 2) return reject(new Error("multi-core engine needs at least 2 threads"));
       var r = isqrt(x);
       var init = null;
-      var b64 = opts.kernels === "js" ? "" : parModuleB64();
-      if (b64 && typeof WebAssembly === "object") {
-        // one shared wasm memory holds control words + both tables
-        // tables start above the module's 64 KiB shadow stack + globals region
-        var ctrlOff = 131072, parOff = 131200, smallOff = 132096;
+      var W = opts.kernels === "js" ? null : wasmModule();
+      var SEG = (W && W.SEG) || 4096;
+      if (W && typeof WebAssembly === "object") {
+        // one shared wasm memory holds control words, block parameters, both
+        // tables and one difference array per thread; everything starts above
+        // the module's 64 KiB shadow stack + globals region
+        var ctrlOff = 131072, parOff = 131200, bpOff = 131328, smallOff = 133120;
         var largeOff = smallOff + 4 * (r + 2);
         largeOff += (8 - (largeOff % 8)) % 8;
-        var total = largeOff + 8 * (r + 2) + 65536;
-        var pages = Math.ceil(total / 65536);
+        var dOff = largeOff + 8 * (r + 2);
+        var total = dOff + K * 8 * (SEG + 2) + 65536;
+        // exactly what we need (never grows); a 4 GiB reservation makes some
+        // browsers refuse shared memory and silently fall back to JS kernels
+        var pages = Math.max(17, Math.ceil(total / 65536));
         try {
-          var memory = new WebAssembly.Memory({ initial: pages, maximum: 65535, shared: true });
-          init = { memory: memory, ctrlOff: ctrlOff, parOff: parOff, smallOff: smallOff, largeOff: largeOff, parB64: b64 };
+          var memory = new WebAssembly.Memory({ initial: pages, maximum: pages, shared: true });
+          init = { memory: memory, ctrlOff: ctrlOff, parOff: parOff, bpOff: bpOff, smallOff: smallOff, largeOff: largeOff,
+                   dOff: dOff, parB64: W.parB64, simd: !!W.simd, seg: SEG };
         } catch (e) { init = null; }
       }
       if (!init) {
         try {
           init = {
-            ctrl: new SharedArrayBuffer(64), par: new SharedArrayBuffer(64),
-            small: new SharedArrayBuffer(4 * (r + 2)), large: new SharedArrayBuffer(8 * (r + 2))
+            ctrl: new SharedArrayBuffer(64), par: new SharedArrayBuffer(64), bp: new SharedArrayBuffer(8 * BP_LEN),
+            small: new SharedArrayBuffer(4 * (r + 2)), large: new SharedArrayBuffer(8 * (r + 2)), seg: SEG
           };
         } catch (e) {
           return reject(new Error("not enough memory for the multi-core tables (" + Math.round(12 * r / 1048576) + " MB)"));
@@ -323,7 +482,7 @@
     primeCountParallel: primeCountParallel,
     available: available,
     threads: threads,
-    kernels: function () { return lastKernels; }, // "wasm" or "js" for the last completed count
-    version: "1.1.0"
+    kernels: function () { return lastKernels; }, // "wasm+simd", "wasm" or "js" for the last completed count
+    version: "2.0.0"
   };
 });

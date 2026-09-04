@@ -8,54 +8,65 @@ for any **1 ≤ n ≤ 2×10¹⁴**. Counts on **every CPU core**, runs as an
 engines** plus an on-the-spot primality proof. Zero dependencies.
 
 ```
-p(10⁶)    =             15,485,863       ~10 ms
-p(10⁹)    =         22,801,763,489       ~90 ms     (the billionth prime)
-p(10¹²)   =     29,996,224,275,833       ~9 s       (the trillionth prime)
-p(10¹³)   =    323,780,508,946,331      ~55 s
-p(10¹⁴)   =  3,475,385,758,524,527       ~5 min     (matches OEIS A006988)
-p(2×10¹⁴) =  7,093,600,525,704,677       ~9 min     (the float64 frontier)
-
-multi-core (4 threads):  p(10¹²) in ~4 s — every core, provably exact
+p(10⁶)    =             15,485,863       ~12 ms
+p(10⁹)    =         22,801,763,489       ~50 ms     (the billionth prime)
+p(10¹²)   =     29,996,224,275,833       ~4 s       (the trillionth prime)   2.0 s on 4 threads
+p(10¹³)   =    323,780,508,946,331      ~21 s                                8.6 s on 4 threads
+p(10¹⁴)   =  3,475,385,758,524,527       ~5 min     (matches OEIS A006988; v2.4 timing, v2.5 is ~3× faster)
+p(2×10¹⁴) =  7,093,600,525,704,677       ~9 min     (the float64 frontier;  v2.4 timing, v2.5 is ~3× faster)
 ```
 
-*(Node 22, single thread, JavaScript with the WebAssembly core — run `npm run bench` yourself.
-In-browser times are similar on a desktop machine.)*
+*(Node 22, single thread unless noted, the WebAssembly core — run `npm run bench` yourself.
+In-browser times are similar on a desktop machine. Version 2.5 made the
+count 3.5× faster than 2.4 by cache-blocking the compiled engine; see Count.)*
 
 ## Multi-core: every CPU core, provably exact
 
-The counting recurrence writes `large[i]` while reading `large[i·p]` (a
-higher index) and writes `small[v]` while reading `small[⌊v/p⌋]` (a lower
-index). Processed in **geometric bands** — `[p^k, p^{k+1})` ascending for
+Most of the work is the **block sweep** described under *Count* below, and
+it has no data hazards at all: the threads simply claim 4096-entry chunks of
+the range through one atomic counter until it is exhausted, so the
+division-heavy low end of a range never lands on a single thread. The
+remaining classical passes write `large[i]` while reading `large[i·p]` (a
+higher index) and write `small[v]` while reading `small[⌊v/p⌋]` (a lower
+index); processed in **geometric bands** — `[p^k, p^{k+1})` ascending for
 `large`, `(r/p^{k+1}, r/p^k]` descending for `small` — every band reads only
 indices outside itself that nothing has written yet in that pass, so each
 band splits across threads with no locks in the hot loops and one barrier per
-band. `parallel.js` runs that over one shared memory; the same source is
-every thread, thread 0 coordinates, and the hot loops are the **compiled C
-kernels** (`engine_par.c`, a thread-safe WebAssembly build of the verified
-engine) with JavaScript kernels as the fallback. In Node it uses
-`worker_threads`; in the browser it needs cross-origin isolation, which the
-app's service worker provides on GitHub Pages (one automatic reload on the
-very first visit). The page says *multi-core ready · N threads* when it's on.
+band or sweep. `parallel.js` runs that over one shared memory; the same
+source is every thread, thread 0 coordinates, and the hot loops are the
+**compiled C kernels** (`engine_par.c`, a thread-safe WebAssembly build of the
+verified engine) with line-for-line JavaScript kernels as the fallback. In
+Node it uses `worker_threads`; in the browser it needs cross-origin
+isolation, which the app's service worker provides on GitHub Pages (one
+automatic reload on the very first visit). The page says *multi-core ready ·
+N threads* when it's on, and *wasm+simd kernels* next to the engine name when
+the SIMD build is running.
 
-Measured on this 4-vCPU machine, answers identical to the single-thread core:
+Measured on this 4-vCPU machine (v2.5), answers identical to the single-thread core:
 
-| | single-thread wasm | 4 threads | speedup |
-|---|---|---|---|
-| π(10¹²) | 1.38 s | 0.46 s | **3.0×** |
-| π(10¹³) | 3.97 s | 1.79 s | **2.2×** |
-| p(10¹²) end-to-end | ~9 s | **3.9 s** | 2.3× |
+| | v2.4 single | v2.5 single | v2.5 2 threads | v2.5 4 threads |
+|---|---|---|---|---|
+| π(10¹²) | 1.38 s | 0.35–0.7 s | 0.48 s | 0.39 s |
+| π(10¹³) | 6.0 s | 1.7–1.9 s | 1.5 s | 1.1–1.3 s |
+| π(3×10¹³) | 12.8 s | 3.4–3.7 s | 2.5–2.8 s | 1.7–2.6 s |
+| p(10¹²) end-to-end | ~9 s | 4.1 s | — | **2.0 s** |
 
-More cores, more speed — the work is ~99% parallel above 10¹¹. The page
-switches to multi-core at x ≈ 10¹² on 4 threads, earlier with more cores
-(below that, thread wake-ups cost more than they save). While the cores
-count, the compute worker sieves the base primes the final walk needs, so
-the walk that used to take up to a second at the top end now takes ~0.1 s.
-(A SIMD build of the kernels was measured at +1–3% and dropped: the work is
-memory-bandwidth-bound, so more lanes don't help — but more cores do.)
-The test suite (2, 3, 4, 5 and auto threads, prime and composite x, cancel)
-requires digit-for-digit agreement with the three single-thread engines —
-which is how a representation mismatch between the C kernels and the
-JavaScript views (u64 vs f64 of the same bytes) was caught before release.
+(Ranges are repeat runs; this shared machine's timing noise is ±10–40%. The
+2-thread column is what a typical laptop gets: π(3×10¹³), the count behind
+p(10¹²), went from 8.9 s to 2.5 s there — a 3.5× cut.)
+
+More cores, more speed. The page switches to multi-core at x ≈ 10¹² on 4
+threads, earlier with more cores (below that, thread wake-ups cost more than
+they save). While the cores count, the compute worker sieves the base primes
+the final walk needs, so the walk takes ~0.1 s even at the top end. The
+kernels ship in two builds — baseline and SIMD (auto-vectorised fills,
++10–20%) — and the loader picks the SIMD one only where
+`WebAssembly.validate` accepts it, so old browsers keep working. The test
+suite (2, 3, 4, 5 and auto threads, both kernel kinds, prime and composite
+x, cancel) requires digit-for-digit agreement with the three single-thread
+engines — which is how a representation mismatch between the C kernels and
+the JavaScript views (u64 vs f64 of the same bytes) was caught before
+release.
 
 ## Running it at full speed
 
@@ -70,9 +81,9 @@ JavaScript views (u64 vs f64 of the same bytes) was caught before release.
 3. **Plug in, and close memory-hungry tabs.** The count is limited by memory
    bandwidth, not arithmetic, so a browser full of heavy tabs slows it; a
    laptop on battery may throttle cores.
-4. **Know the sizes.** Up to 10¹² is seconds; 10¹³ is about half a minute on
-   4 threads; 10¹⁴ is minutes; anything ≥ 2×10¹³ needs ~1 GB of free RAM.
-   Use *cancel* freely — it stops every thread at once.
+4. **Know the sizes.** Up to 10¹² is a few seconds; 10¹³ is under ten seconds
+   on 4 threads; 10¹⁴ is a couple of minutes; anything ≥ 2×10¹³ needs ~1 GB
+   of free RAM. Use *cancel* freely — it stops every thread at once.
 5. **For the biggest jobs use the command line**, which has no browser memory
    ceiling: `node cli.js 2e14` uses every core (add `--threads K` to tune —
    the number of *physical* cores is usually best), and
@@ -175,13 +186,39 @@ estimate can never produce a wrong answer — only a slower one.
 **Speed engine — Lucy_Hedgehog's algorithm compiled from C to WebAssembly**
 (O(x^¾) time, O(√x) space): a dynamic programme over the ≤ 2√x distinct
 values of ⌊x/k⌋ with the recurrence `S(v) ← S(v) − [S(⌊v/p⌋) − π(p−1)]`.
-The C core (`engine.c`, ~60 lines, zero libc) ships as a 1.8 KB wasm module
-embedded base64 in the page; steady-state it runs ~1.5× faster than the JS
-engine. A performance lesson we measured the hard way: a naive C port was
-*slower* than JavaScript (0.7×), because this algorithm is bound by 64-bit
-integer division (~25–40 cycles each). The fix — in both languages — is
-pipelined *double* division with a proof of exactness below 2⁵³. V8's JIT
-had been applying that trick all along; C had to be taught it.
+The C core (`engine.c`, zero libc) ships as ~5 KB wasm modules embedded
+base64 in the page. Version 2.5 made it **3.5× faster** than 2.4 at 10¹³ and
+above, by profiling the compiled code loop by loop and changing only *how*
+the same recurrence is evaluated:
+
+* **Runs, walked by quotient.** For i > √(x/p) consecutive i share one
+  quotient q = ⌊x/(ip)⌋, and the run of q is exactly
+  (⌊xp/(q+1)⌋, ⌊xp/q⌋]. Walking q downward costs one *independent*
+  division per run; the previous form (`q = xp/i`, then `end = xp/q`, then
+  `i = end+1`) was a serial chain of two divisions per run, ~30 cycles of
+  pure latency — 52% of the whole count.
+* **Blocks of primes, one cache-blocked sweep.** Primes are processed in
+  blocks of up to 32 consecutive primes p₁ < … < pₖ ≤ 2p₁. For every
+  i > I₀ = max(r/p₁, x/p₁³), each prime's update of `large[i]` reads only
+  `small[q]` with q < p₁² — a region no small-pass of the block touches — so
+  the k passes commute and are applied to `large[(I₀, imax]]` in one sweep
+  through 32 KiB segments. Within a segment, each prime's runs go to a
+  **difference array** (`D[start] += c; D[end+1] −= c`) and one prefix-sum
+  pass materialises all k primes at once: the 3×10⁹ fill writes at x = 3×10¹³
+  become 2×10⁸ writes into L1 cache. The prefix i ≤ I₀ is then done prime by
+  prime in the classical order; its reads of `large[m]` with I₀ < m ≤ r add
+  back the sweep's contributions of the later primes, so every value read is
+  exactly S at the right stage.
+* **What did *not* help, measured:** a reciprocal table instead of division
+  (−26%), hand-written two-lane SIMD division (−17%, lane moves are
+  expensive), signed float→int conversion (−44%). Auto-vectorised fills
+  (+10–20%) and non-trapping float→int conversion (+13%) did, and stayed.
+
+Every variant was accepted only after agreeing digit-for-digit with the
+unchanged JavaScript engine on ~3400 inputs, then with the LMO engine in
+the test suite. An older lesson still applies: this algorithm is bound by
+64-bit division, and the exact trick in both languages is pipelined *double*
+division with a proof of exactness below 2⁵³.
 
 **Reference engine — the same algorithm in pure JavaScript**, used as the
 automatic fallback wherever WebAssembly is unavailable, and as engine #2 in
@@ -207,7 +244,7 @@ Milliseconds.
 
 ## How it is verified
 
-`npm test` (~10 s) runs 12 independent layers, 239 checks (more in --slow / --huge):
+`npm test` (~10 s) runs 12 independent layers, 259 checks (more in --slow / --huge):
 
 1. `primesUpTo` vs brute-force trial division;
 2. table/sieve paths vs an independently generated prime list;
@@ -219,12 +256,15 @@ Milliseconds.
 7. estimates always inside the rigorous Rosser/Dusart bracket;
 8. input-validation edge cases;
 9. **triple-engine agreement** (compiled wasm vs JS Lucy vs LMO) on
-   structured + random x and several α values — the flagship check;
+   structured + random x and several α values — the flagship check — plus
+   75 values chosen to cross the compiled engine's block-start threshold,
+   segment boundaries and corrected prefix reads;
 10. the deterministic polynomial-time primality test vs trial division,
     Carmichael numbers, Mersenne primes and the project's own verified primes;
 11. `countPrimes` (the page's π(x) mode) and the neighbouring-prime
     verification attached to every answer, vs an independent prime list;
-12. the self-contained `index.html` embeds the current engine byte-for-byte.
+12. the self-contained `index.html` embeds the current engine byte-for-byte;
+    and the multi-core engine, with both kernel kinds, on 2–5 and auto threads.
 
 Top-end results verified this way: π(10¹³) = 346,065,536,839 and
 π(10¹⁴) = 3,204,941,750,802 (both engines, both correct), and
@@ -287,14 +327,15 @@ npm run bench       # timing table; --big / --huge tiers
 | `style.css` | styling (inlined at build) |
 | `nthprime.js` | both engines + estimate + walk (inlined at build; Node-ready) |
 | `build.js` | `npm run build` regenerates index.html |
-| `engine.c` | the C core — Lucy counting for wasm32 |
-| `wasmbuild.js` | `npm run build:wasm` — clang → engine.wasm → engine-wasm.js |
-| `engine-wasm.js` | **generated** base64-embedded wasm loader (committed so clang isn't required) |
+| `engine.c` | the C core — cache-blocked Lucy counting for wasm32 |
+| `wasmbuild.js` | `npm run build:wasm` — clang → four .wasm builds → engine-wasm.js |
+| `engine-wasm.js` | **generated** base64-embedded wasm loader with SIMD detection (committed so clang isn't required) |
+| `engine.wasm` / `engine_simd.wasm` | the single-thread core, baseline and SIMD builds |
 | `cli.js` | nth-prime and π(x) command line |
 | `test/test.js` | the verification suite |
 | `bench.js` | timing table |
 | `parallel.js` | the multi-core engine (shared memory + workers; inlined into the page) |
-| `engine_par.c` / `engine_par.wasm` | thread-safe compiled kernels for the multi-core engine (base64 in engine-wasm.js) |
+| `engine_par.c` / `engine_par*.wasm` | thread-safe compiled kernels for the multi-core engine, baseline and SIMD builds (base64 in engine-wasm.js) |
 | `sw.js` | service worker: offline cache + cross-origin isolation for multi-core |
 | `manifest.webmanifest`, `icon-*.png`, `icon.js` | installable-app metadata; icons are generated by `node icon.js` |
 | `.github/workflows/ci.yml` | runs the whole verification suite on every push (Node 20 + 22) |

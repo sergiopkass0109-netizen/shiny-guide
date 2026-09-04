@@ -263,6 +263,8 @@ section("LMO engine agrees with Lucy_Hedgehog engine (independent algorithms)");
   }
   check(true, xs.length + " cross-engine checks agree");
   eq(NP.primeCountLMO(1e10), 455052511, "LMO π(10^10)");
+  eq(NP.primeCount(1e11), 4118054813, "Lucy/JS π(10^11) (descending-quotient runs)");
+  if (NP.wasmAvailable()) eq(NP.primeCountWasm(1e11), 4118054813, "wasm π(10^11) (cache-blocked sweeps)");
   if (NP.wasmAvailable()) {
     for (i = 0; i < xs.length; i += 2) {
       var xw = xs[i];
@@ -271,6 +273,26 @@ section("LMO engine agrees with Lucy_Hedgehog engine (independent algorithms)");
       if (aw !== bw) check(false, "wasm disagrees at x=" + xw + ": js=" + aw + " wasm=" + bw);
     }
     eq(NP.primeCountWasm(1e10), 455052511, "WASM π(10^10)");
+    // the compiled engine processes primes in blocks with a cache-blocked
+    // multi-prime sweep and a difference array; every x below crosses its
+    // block-start threshold, segment boundaries and the corrected prefix
+    // reads differently, and all must match the classical JS recurrence
+    var xb = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 24, 25, 26, 48, 49, 50, 120, 121, 122, 1000, 4096, 4097, 65535, 65536, 65537,
+              262144, 1048576, 1048583, 16777216, 33554432, 99999989, 123456789, 2147483647, 4294967296, 6e9];
+    var seedb = 424242;
+    for (i = 0; i < 40; i++) {
+      seedb = (seedb * 1103515245 + 12345) % 2147483648;
+      xb.push(Math.floor(Math.pow(10, 3 + 7 * (seedb / 2147483648))));   // log-uniform in [10^3, 10^10]
+    }
+    var badb = 0;
+    for (i = 0; i < xb.length; i++) {
+      var ab = NP.primeCount(xb[i]), bb = NP.primeCountWasm(xb[i]);
+      if (ab !== bb) { badb++; check(false, "wasm disagrees at x=" + xb[i] + ": js=" + ab + " wasm=" + bb); }
+    }
+    check(badb === 0, xb.length + " block-boundary / log-uniform values agree between wasm and JS");
+    var W = require("../engine-wasm.js");
+    check(typeof W.simd === "boolean" && typeof W.SEG === "number" && W.SEG >= 256, "wasm loader reports SIMD support (" + W.simd + ") and segment length (" + W.SEG + ")");
+    check(W.parB64.length > 0 && W.parB64Plain.length > 0, "both shared-memory kernel builds are embedded");
     check(true, "compiled engine agrees (triple-engine verification)");
   } else {
     console.log("  (WebAssembly engine unavailable here — skipped)");
@@ -404,7 +426,18 @@ var parallelDone = (function () {
   cases.forEach(function (c) {
     chain = chain.then(function () {
       return PAR.primeCountParallel(c[0], { threads: c[1] || undefined }).then(function (v) {
-        eq(v, NP.primeCount(c[0]), "multi-core π(" + c[0] + ") threads=" + (c[1] || "auto"));
+        eq(v, NP.primeCount(c[0]), "multi-core π(" + c[0] + ") threads=" + (c[1] || "auto") + " [" + PAR.kernels() + " kernels]");
+      });
+    });
+  });
+  // the JavaScript twins of the kernels must agree too (they serve browsers
+  // whose shared-memory wasm build cannot load), including the dynamic
+  // chunk sharing and the cache-blocked sweep
+  [[2e9, 3], [12345678901, 2]].forEach(function (c) {
+    chain = chain.then(function () {
+      return PAR.primeCountParallel(c[0], { threads: c[1], kernels: "js" }).then(function (v) {
+        eq(v, NP.primeCount(c[0]), "multi-core π(" + c[0] + ") threads=" + c[1] + " with JS kernels");
+        eq(PAR.kernels(), "js", "…reports js kernels");
       });
     });
   });
