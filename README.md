@@ -12,8 +12,8 @@ p(10⁶)    =             15,485,863       ~12 ms
 p(10⁹)    =         22,801,763,489       ~50 ms     (the billionth prime)
 p(10¹²)   =     29,996,224,275,833       ~4 s       (the trillionth prime)   2.0 s on 4 threads
 p(10¹³)   =    323,780,508,946,331      ~21 s                                8.6 s on 4 threads
-p(10¹⁴)   =  3,475,385,758,524,527       ~5 min     (matches OEIS A006988; v2.4 timing, v2.5 is ~3× faster)
-p(2×10¹⁴) =  7,093,600,525,704,677       ~9 min     (the float64 frontier;  v2.4 timing, v2.5 is ~3× faster)
+p(10¹⁴)   =  3,475,385,758,524,527       ~95 s      (matches OEIS A006988)   33 s on 4 threads
+p(2×10¹⁴) =  7,093,600,525,704,677      ~150 s      (the float64 frontier)   53 s on 4 threads
 ```
 
 *(Node 22, single thread unless noted, the WebAssembly core — run `npm run bench` yourself.
@@ -82,8 +82,9 @@ release.
    bandwidth, not arithmetic, so a browser full of heavy tabs slows it; a
    laptop on battery may throttle cores.
 4. **Know the sizes.** Up to 10¹² is a few seconds; 10¹³ is under ten seconds
-   on 4 threads; 10¹⁴ is a couple of minutes; anything ≥ 2×10¹³ needs ~1 GB
-   of free RAM. Use *cancel* freely — it stops every thread at once.
+   on 4 threads; 10¹⁴ is about half a minute on 4 threads (1½ minutes on one);
+   anything ≥ 2×10¹³ needs ~1 GB of free RAM. Use *cancel* freely — it stops
+   every thread at once.
 5. **For the biggest jobs use the command line**, which has no browser memory
    ceiling: `node cli.js 2e14` uses every core (add `--threads K` to tune —
    the number of *physical* cores is usually best), and
@@ -132,9 +133,9 @@ The count step costs ~p(n)^¾ ≈ (n ln n)^¾, so a 10× larger n costs about
 
 | step up | time ratio | linear would be | exponential would be |
 |---|---|---|---|
-| 10¹² → 10¹³ | 6.1× | 10× | astronomically worse |
-| 10¹³ → 10¹⁴ | 5.5× | 10× | astronomically worse |
-| 10¹⁴ → 2×10¹⁴ | 1.8× | 2× | — |
+| 10¹² → 10¹³ | 5.1× | 10× | astronomically worse |
+| 10¹³ → 10¹⁴ | 4.5× | 10× | astronomically worse |
+| 10¹⁴ → 2×10¹⁴ | 1.6× | 2× | — |
 
 Run `npm run bench` and read the `scaling` column: it prints the measured
 exponent e in *time ∝ nᵉ* between tiers — consistently ≈ 0.78, i.e.
