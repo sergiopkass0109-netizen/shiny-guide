@@ -11,17 +11,20 @@ primality proof, with a one-click cross-check by a second algorithm on every
 core. Zero dependencies.
 
 ```
-p(10⁶)    =             15,485,863       ~12 ms
-p(10⁹)    =         22,801,763,489       ~50 ms     (the billionth prime)
-p(10¹²)   =     29,996,224,275,833       ~4 s       (the trillionth prime)   2.0 s on 4 threads
-p(10¹³)   =    323,780,508,946,331      ~21 s                                8.6 s on 4 threads
-p(10¹⁴)   =  3,475,385,758,524,527       ~95 s      (matches OEIS A006988)   33 s on 4 threads
-p(2×10¹⁴) =  7,093,600,525,704,677      ~150 s      (the float64 frontier)   53 s on 4 threads
+p(10⁶)    =             15,485,863       ~10 ms
+p(10⁹)    =         22,801,763,489       ~25 ms     (the billionth prime)
+p(10¹²)   =     29,996,224,275,833       0.7 s      (the trillionth prime)
+p(10¹³)   =    323,780,508,946,331       2.9 s
+p(10¹⁴)   =  3,475,385,758,524,527        13 s      (matches OEIS A006988)
+p(2×10¹⁴) =  7,093,600,525,704,677        21 s      (the float64 frontier)
+
+π(10¹⁵)   =     29,844,570,422,669       5.4 s      (exact prime count, one thread, a few MB)
 ```
 
-*(Node 22, single thread unless noted, the WebAssembly core — run `npm run bench` yourself.
-In-browser times are similar on a desktop machine. Version 2.5 made the
-count 3.5× faster than 2.4 by cache-blocking the compiled engine; see Count.)*
+*(Node 22, one thread, the compiled Deléglise–Rivat engine of version 2.8 —
+run `npm run bench` yourself; in-browser times are similar on a desktop.
+For scale: version 2.7 needed 95 s for p(10¹⁴) on one thread and 33 s on
+four; 2.4 needed 5 minutes.)*
 
 ## Multi-core: every CPU core, provably exact
 
@@ -52,23 +55,18 @@ automatic reload on the very first visit). The page says *multi-core ready ·
 N threads* when it's on, and *wasm+simd kernels* next to the engine name when
 the SIMD build is running.
 
-Measured on this 4-vCPU machine (v2.5), answers identical to the single-thread core:
+Measured on this 4-vCPU machine (version 2.8, all answers identical):
 
-| | v2.4 single | v2.5 single | v2.5 2 threads | v2.5 4 threads |
+| exact π(x) | Deléglise–Rivat, 1 thread | Lucy, 1 thread | Lucy, 2 threads | Lucy, 4 threads |
 |---|---|---|---|---|
-| π(10¹²) | 1.38 s | 0.35–0.7 s | 0.48 s | 0.39 s |
-| π(10¹³) | 6.0 s | 1.7–1.9 s | 1.5 s | 1.1–1.3 s |
-| π(3×10¹³) | 12.8 s | 3.4–3.7 s | 2.5–2.8 s | 1.7–2.6 s |
-| p(10¹²) end-to-end | ~9 s | 4.1 s | — | **2.0 s** |
+| π(10¹²) | **0.15 s** | 0.38 s | 0.27 s | 0.21 s |
+| π(10¹³) | **0.30 s** | 0.90 s | 0.70 s | 0.54 s |
+| π(3×10¹³) | **0.57 s** | 1.9 s | 1.4 s | 0.95 s |
+| π(10¹⁴) | **1.3 s** | 4.5 s | 2.9 s | 1.9 s |
 
-(Ranges are repeat runs; this shared machine's timing noise is ±10–40%. The
-2-thread column is what a typical laptop gets: π(3×10¹³), the count behind
-p(10¹²), went from 8.9 s to 2.5 s there — a 3.5× cut.)
-
-More cores, more speed. The page switches to multi-core at x ≈ 10¹² on 4
-threads, earlier with more cores (below that, thread wake-ups cost more than
-they save). While the cores count, the compute worker sieves the base primes
-the final walk needs, so the walk takes ~0.1 s even at the top end. The
+The page uses the multi-core engine for counting only on machines with 12
+or more threads (where it catches up with Deléglise–Rivat) and otherwise
+keeps it for the cross-check. The
 kernels ship in two builds — baseline and SIMD (auto-vectorised fills,
 +10–20%) — and the loader picks the SIMD one only where
 `WebAssembly.validate` accepts it, so old browsers keep working. The test
@@ -96,24 +94,20 @@ multi-core runs with both kernel kinds.
 ## Running it at full speed
 
 1. **Use the hosted app** (the GitHub Pages link) in **Chrome, Edge or
-   Firefox on a desktop or laptop**. Multi-core needs cross-origin isolation,
-   which the app's service worker provides there; the header must read
-   *multi-core ready · N threads*. The very first visit reloads once to turn
-   it on. Safari doesn't honour the worker-added isolation headers, so it
-   runs single-threaded; phones are fine to ~10¹¹.
+   Firefox on a desktop or laptop**. The count itself is single-threaded and
+   needs nothing special; the multi-core *cross-check* needs cross-origin
+   isolation, which the app's service worker provides there (the very first
+   visit reloads once to turn it on; Safari doesn't honour the worker-added
+   headers, so it has no cross-check). Phones are fine to ~10¹².
 2. **Install it** (*install as app* in the header): it opens in its own
    window with the service worker already warm, and works offline.
-3. **Plug in, and close memory-hungry tabs.** The count is limited by memory
-   bandwidth, not arithmetic, so a browser full of heavy tabs slows it; a
-   laptop on battery may throttle cores.
-4. **Know the sizes.** Up to 10¹² is a few seconds; 10¹³ is under ten seconds
-   on 4 threads; 10¹⁴ is about half a minute on 4 threads (1½ minutes on one);
-   anything ≥ 2×10¹³ needs ~1 GB of free RAM. Use *cancel* freely — it stops
-   every thread at once.
-5. **For the biggest jobs use the command line**, which has no browser memory
-   ceiling: `node cli.js 2e14` uses every core (add `--threads K` to tune —
-   the number of *physical* cores is usually best), and
-   `node cli.js --pi 1e13 --engine all` runs all engines and confirms they agree.
+3. **Plug in.** A laptop on battery may throttle the core doing the work.
+4. **Know the sizes.** Up to 10¹² is under a second; 10¹³ about three
+   seconds; 10¹⁴ about fifteen; the top of the range (2×10¹⁴) about twenty,
+   all on one thread and a few megabytes of memory. Use *cancel* freely.
+5. **The command line** runs the same engines: `node cli.js 2e14`, and
+   `node cli.js --pi 1e15 --engine all` runs all five (Deléglise–Rivat, two
+   Lucy builds, LMO, multi-core Lucy) and confirms they agree.
 6. **A saved copy of `index.html`** works anywhere, offline, single-threaded.
 
 ## It's an app, not a page
@@ -140,31 +134,35 @@ edge of it.
 |---|---|---|
 | typical online "nth prime" calculators | ~10⁶–10⁹ | server or browser |
 | [The Nth Prime Page (t5k.org)](https://t5k.org/nthprime/) — the standard reference | 10¹² | **their server** |
-| **this project** | **2×10¹⁴** | **your browser tab / a single HTML file** |
+| **this project** | **2×10¹⁴** (π to 9×10¹⁵) | **your browser tab / a single HTML file** |
 | [primecount](https://github.com/kimwalisch/primecount) (Kim Walisch) | ~10²⁴ | native C++, multithreaded, installed |
 
-So: **200× beyond the reference web tool, exact, running client-side** — and
-every answer is reproducible by two independent algorithms (below). What this
-project does *not* claim: beating primecount. Hand-tuned, multithreaded C++
-with decades of optimization is faster than any web page; this is the same
-mathematics brought to a place it has never been deployed — a single
-self-contained HTML file you can save, open offline, and audit.
+So: **200× beyond the reference web tool, exact, running client-side**, with
+the same algorithm family primecount uses (Deléglise–Rivat) and every answer
+reproducible by three independent engines. What this project does *not*
+claim: beating primecount. Its Gourdon variant with AVX and OpenMP does
+π(10¹⁵) in about a second on one core where this engine takes 5.4 s in
+WebAssembly, and it scales to 10²⁹ with 128-bit arithmetic where this one
+stops at 2⁵³. This is the research-grade mathematics brought to a place it
+has never been deployed — a single self-contained HTML file you can save,
+open offline, and audit — with an engine of a second, unrelated algorithm
+one click away to confirm any answer.
 
 ## Scaling: sublinear, measured — and the polynomial-time question
 
 **How does time grow as n grows?** Not exponentially — not even linearly.
-The count step costs ~p(n)^¾ ≈ (n ln n)^¾, so a 10× larger n costs about
-5.6× more time, forever. Measured on this machine:
+The count step costs ~p(n)^⅔/log² ≈ (n ln n)^⅔/log², so a 10× larger n costs
+about 4.5× more time, forever. Measured on this machine (version 2.8):
 
 | step up | time ratio | linear would be | exponential would be |
 |---|---|---|---|
-| 10¹² → 10¹³ | 5.1× | 10× | astronomically worse |
+| 10¹² → 10¹³ | 4.2× | 10× | astronomically worse |
 | 10¹³ → 10¹⁴ | 4.5× | 10× | astronomically worse |
 | 10¹⁴ → 2×10¹⁴ | 1.6× | 2× | — |
 
 Run `npm run bench` and read the `scaling` column: it prints the measured
-exponent e in *time ∝ nᵉ* between tiers — consistently ≈ 0.78, i.e.
-**sublinear**. (In fact every named algorithm here is a polynomial-in-n
+exponent e in *time ∝ nᵉ* between tiers — ≈ 0.65 now (0.78 with the Lucy
+engine), i.e. **sublinear**. (In fact every named algorithm here is a polynomial-in-n
 algorithm; the field's open frontier is different — see below.)
 
 **And "polynomial time" in the computer-science sense?** There the input
@@ -338,7 +336,7 @@ Milliseconds.
 
 ## How it is verified
 
-`npm test` (~12 s) runs 12 independent layers, 260 checks (more in --slow / --huge):
+`npm test` (~15 s) runs 13 independent layers, 280 checks (more in --slow / --huge):
 
 1. `primesUpTo` vs brute-force trial division;
 2. table/sieve paths vs an independently generated prime list;
