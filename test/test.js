@@ -407,6 +407,9 @@ section("index.html is self-contained and in sync (run `npm run build` if not)")
   check(html.indexOf(style) !== -1, "index.html embeds current style.css");
   check(html.indexOf(wasmjs) !== -1, "index.html embeds current engine-wasm.js");
   check(html.indexOf("/*BUILD:") === -1, "no unreplaced build markers");
+  var pkgVersion = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+  check(html.indexOf(">v" + pkgVersion + "<") !== -1, "index.html shows the package.json version (v" + pkgVersion + ")");
+  check(fs.readFileSync(path.join(root, "sw.js"), "utf8").indexOf("nthprime-v" + pkgVersion + "\"") !== -1, "service-worker cache name matches the version");
   check(html.indexOf("<script src=") === -1 && html.indexOf("<link rel=\"stylesheet\"") === -1,
     "no external file references");
 })();

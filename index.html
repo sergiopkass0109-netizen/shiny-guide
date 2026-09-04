@@ -258,7 +258,7 @@ footer a:hover { text-decoration: underline; }
     <h1>The <em>n</em>-th Prime</h1>
     <p class="tagline">
       Riemann&nbsp;R inverse estimate&nbsp;·&nbsp;Lucy_Hedgehog exact count
-      <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;compiled C/WebAssembly core&nbsp;·&nbsp;triple-engine verified
+      <span class="complexity">O(x<sup>3/4</sup>)</span>&nbsp;·&nbsp;compiled C/WebAssembly core&nbsp;·&nbsp;triple-engine verified&nbsp;·&nbsp;<span id="version" title="build version (from package.json)">v2.7.0</span>
     </p>
     <p class="status-line"><span id="mc-status"></span><button id="install" class="chip" hidden>install as app</button></p>
   </header>
@@ -324,8 +324,9 @@ footer a:hover { text-decoration: underline; }
       architecture after <a href="https://github.com/kimwalisch/primecount">primecount</a>;
       every result reachable by two independent algorithms (Lucy_Hedgehog and
       Lagarias–Miller–Odlyzko) that are cross-checked in the test suite.
-      Heads-up: n = 10<sup>12</sup> takes ~15 s, 10<sup>13</sup> ~2 min,
-      beyond that is best run in a desktop browser or the Node CLI.
+      Heads-up: n = 10<sup>12</sup> takes a few seconds, 10<sup>13</sup> under
+      half a minute on a multi-core desktop; beyond that is best run in a desktop
+      browser or the Node CLI.
     </p>
   </footer>
 </main>

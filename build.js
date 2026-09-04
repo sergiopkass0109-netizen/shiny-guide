@@ -16,6 +16,7 @@ var style = read("style.css").trim();
 var engine = read("nthprime.js").trim();
 var wasmjs = read("engine-wasm.js").trim();
 var parjs = read("parallel.js").trim();
+var version = JSON.parse(read("package.json")).version;   // shown in the header so an update is visible at a glance
 
 if (engine.indexOf("</script") !== -1 || style.indexOf("</style") !== -1 ||
     wasmjs.indexOf("</script") !== -1 || parjs.indexOf("</script") !== -1) {
@@ -27,7 +28,8 @@ var html = template
   .split("/*BUILD:STYLE*/").join(style)
   .split("/*BUILD:ENGINE*/").join(engine)
   .split("/*BUILD:WASM*/").join(wasmjs)
-  .split("/*BUILD:PARALLEL*/").join(parjs);
+  .split("/*BUILD:PARALLEL*/").join(parjs)
+  .split("/*BUILD:VERSION*/").join(version);
 
 if (html.indexOf("/*BUILD:") !== -1) {
   throw new Error("unreplaced BUILD marker left in output");
